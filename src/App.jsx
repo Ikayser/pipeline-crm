@@ -8,6 +8,8 @@ const initialProspects = [
     id: 1,
     company: 'Acme Corp',
     contact: 'Sarah Chen',
+    linkedIn: 'https://linkedin.com/in/sarachen',
+    title: 'VP of Operations',
     workType: 'Consulting',
     budget: 50000,
     stage: 'Proposal',
@@ -22,6 +24,8 @@ const initialProspects = [
     id: 2,
     company: 'Nebula Industries',
     contact: 'Marcus Webb',
+    linkedIn: '',
+    title: 'CTO',
     workType: 'Development',
     budget: 120000,
     stage: 'Meeting',
@@ -35,6 +39,8 @@ const initialProspects = [
     id: 3,
     company: 'Flux Design Co',
     contact: 'Elena Varga',
+    linkedIn: 'https://linkedin.com/in/elenavarga',
+    title: 'Founder',
     workType: 'Strategy',
     budget: 25000,
     stage: 'Lead',
@@ -85,7 +91,7 @@ export default function CRMDashboard() {
     if (prospect.id) {
       setProspects(prospects.map(p => p.id === prospect.id ? prospect : p));
     } else {
-      setProspects([...prospects, { ...prospect, id: Date.now(), engagements: [] }]);
+      setProspects([...prospects, { ...prospect, id: Date.now(), engagements: [], linkedIn: prospect.linkedIn || '', title: prospect.title || '' }]);
     }
     setShowForm(false);
     setEditingProspect(null);
@@ -129,12 +135,14 @@ export default function CRMDashboard() {
           id: Date.now() + idx,
           company: row['company'] || row['organization'] || 'Unknown',
           contact: `${row['first name'] || row['firstname'] || ''} ${row['last name'] || row['lastname'] || ''}`.trim() || row['name'] || 'Unknown',
+          linkedIn: row['url'] || row['linkedin'] || row['linkedin url'] || row['profile url'] || '',
+          title: row['position'] || row['title'] || row['job title'] || '',
           workType: 'Other',
           budget: 0,
           stage: 'Lead',
           lastEngagement: new Date().toISOString().split('T')[0],
           engagements: [],
-          context: row['position'] || row['title'] || ''
+          context: row['notes'] || ''
         };
       });
       
@@ -145,9 +153,9 @@ export default function CRMDashboard() {
   };
 
   const handleExportCSV = () => {
-    const headers = ['Company', 'Contact', 'Work Type', 'Budget', 'Stage', 'Last Engagement', 'Context'];
+    const headers = ['Company', 'Contact', 'Title', 'LinkedIn', 'Work Type', 'Budget', 'Stage', 'Last Engagement', 'Context'];
     const rows = prospects.map(p => [
-      p.company, p.contact, p.workType, p.budget, p.stage, p.lastEngagement, p.context
+      p.company, p.contact, p.title || '', p.linkedIn || '', p.workType, p.budget, p.stage, p.lastEngagement, p.context
     ]);
     const csv = [headers, ...rows].map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
@@ -239,6 +247,7 @@ export default function CRMDashboard() {
                       >
                         <div style={styles.cardCompany}>{prospect.company}</div>
                         <div style={styles.cardContact}>{prospect.contact}</div>
+                        {prospect.title && <div style={styles.cardTitle}>{prospect.title}</div>}
                         <div style={styles.cardMeta}>
                           <span>{prospect.workType}</span>
                           <span>{formatCurrency(prospect.budget)}</span>
@@ -262,6 +271,7 @@ export default function CRMDashboard() {
                 <tr>
                   <th style={styles.th}>Company</th>
                   <th style={styles.th}>Contact</th>
+                  <th style={styles.th}>Title</th>
                   <th style={styles.th}>Type</th>
                   <th style={styles.th}>Budget</th>
                   <th style={styles.th}>Stage</th>
@@ -276,7 +286,21 @@ export default function CRMDashboard() {
                     onClick={() => setSelectedProspect(prospect)}
                   >
                     <td style={styles.td}>{prospect.company}</td>
-                    <td style={styles.td}>{prospect.contact}</td>
+                    <td style={styles.td}>
+                      {prospect.contact}
+                      {prospect.linkedIn && (
+                        <a 
+                          href={prospect.linkedIn} 
+                          target="_blank" 
+                          rel="noopener noreferrer"
+                          onClick={e => e.stopPropagation()}
+                          style={styles.tableLinkIcon}
+                        >
+                          ↗
+                        </a>
+                      )}
+                    </td>
+                    <td style={styles.tdSecondary}>{prospect.title || '—'}</td>
                     <td style={styles.td}>{prospect.workType}</td>
                     <td style={styles.td}>{formatCurrency(prospect.budget)}</td>
                     <td style={styles.td}>{prospect.stage}</td>
@@ -372,7 +396,24 @@ export default function CRMDashboard() {
               <div style={styles.detailSection}>
                 <label style={styles.detailLabel}>Contact</label>
                 <p style={styles.detailValue}>{selectedProspect.contact}</p>
+                {selectedProspect.title && (
+                  <p style={styles.detailValueSecondary}>{selectedProspect.title}</p>
+                )}
               </div>
+
+              {selectedProspect.linkedIn && (
+                <div style={styles.detailSection}>
+                  <label style={styles.detailLabel}>LinkedIn</label>
+                  <a 
+                    href={selectedProspect.linkedIn} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    style={styles.linkedInLink}
+                  >
+                    View Profile →
+                  </a>
+                </div>
+              )}
               
               <div style={styles.detailRow}>
                 <div style={styles.detailSection}>
@@ -475,6 +516,8 @@ function ProspectForm({ prospect, onSave, onCancel }) {
   const [form, setForm] = useState(prospect || {
     company: '',
     contact: '',
+    linkedIn: '',
+    title: '',
     workType: 'Consulting',
     budget: 0,
     stage: 'Lead',
@@ -487,24 +530,45 @@ function ProspectForm({ prospect, onSave, onCancel }) {
     onSave({ ...form, budget: Number(form.budget) });
   };
 
+  const handleLinkedInPaste = (e) => {
+    const url = e.target.value;
+    setForm({ ...form, linkedIn: url });
+  };
+
   return (
     <div style={styles.overlay} onClick={onCancel}>
       <div style={styles.modal} onClick={e => e.stopPropagation()}>
         <h2 style={styles.modalTitle}>{prospect ? 'Edit Prospect' : 'New Prospect'}</h2>
         <form onSubmit={handleSubmit} style={styles.form}>
+          <div style={styles.formSection}>
+            <label style={styles.formSectionLabel}>LinkedIn Profile</label>
+            <div style={styles.linkedInInputWrapper}>
+              <input
+                type="url"
+                value={form.linkedIn}
+                onChange={handleLinkedInPaste}
+                placeholder="https://linkedin.com/in/username"
+                style={styles.input}
+              />
+              {form.linkedIn && (
+                <a 
+                  href={form.linkedIn} 
+                  target="_blank" 
+                  rel="noopener noreferrer"
+                  style={styles.linkedInPreviewLink}
+                >
+                  Open →
+                </a>
+              )}
+            </div>
+            <p style={styles.formHint}>Paste a LinkedIn URL, then fill in details from their profile</p>
+          </div>
+
+          <div style={styles.formDivider} />
+
           <div style={styles.formRow}>
             <div style={styles.formGroup}>
-              <label style={styles.formLabel}>Company</label>
-              <input
-                type="text"
-                value={form.company}
-                onChange={e => setForm({ ...form, company: e.target.value })}
-                style={styles.input}
-                required
-              />
-            </div>
-            <div style={styles.formGroup}>
-              <label style={styles.formLabel}>Contact</label>
+              <label style={styles.formLabel}>Contact Name</label>
               <input
                 type="text"
                 value={form.contact}
@@ -513,6 +577,27 @@ function ProspectForm({ prospect, onSave, onCancel }) {
                 required
               />
             </div>
+            <div style={styles.formGroup}>
+              <label style={styles.formLabel}>Title / Role</label>
+              <input
+                type="text"
+                value={form.title}
+                onChange={e => setForm({ ...form, title: e.target.value })}
+                placeholder="e.g. VP of Engineering"
+                style={styles.input}
+              />
+            </div>
+          </div>
+
+          <div style={styles.formGroup}>
+            <label style={styles.formLabel}>Company</label>
+            <input
+              type="text"
+              value={form.company}
+              onChange={e => setForm({ ...form, company: e.target.value })}
+              style={styles.input}
+              required
+            />
           </div>
 
           <div style={styles.formRow}>
@@ -566,6 +651,7 @@ function ProspectForm({ prospect, onSave, onCancel }) {
               onChange={e => setForm({ ...form, context: e.target.value })}
               style={styles.textarea}
               rows={3}
+              placeholder="Key interests, how you met, decision-making process, etc."
             />
           </div>
 
@@ -826,6 +912,11 @@ const styles = {
   cardContact: {
     fontSize: '12px',
     color: '#666',
+    marginBottom: '2px'
+  },
+  cardTitle: {
+    fontSize: '11px',
+    color: '#999',
     marginBottom: '8px'
   },
   cardMeta: {
@@ -864,6 +955,18 @@ const styles = {
   td: {
     padding: '12px 16px',
     borderBottom: '1px solid #eee'
+  },
+  tdSecondary: {
+    padding: '12px 16px',
+    borderBottom: '1px solid #eee',
+    color: '#666',
+    fontSize: '13px'
+  },
+  tableLinkIcon: {
+    marginLeft: '6px',
+    color: '#000',
+    textDecoration: 'none',
+    fontSize: '11px'
   },
   insightsView: {},
   insightsGrid: {
@@ -1029,6 +1132,19 @@ const styles = {
     fontSize: '14px',
     margin: 0
   },
+  detailValueSecondary: {
+    fontSize: '13px',
+    margin: 0,
+    marginTop: '2px',
+    color: '#666'
+  },
+  linkedInLink: {
+    fontSize: '13px',
+    color: '#000',
+    textDecoration: 'none',
+    borderBottom: '1px solid #000',
+    paddingBottom: '1px'
+  },
   stageSelector: {
     display: 'flex',
     flexWrap: 'wrap',
@@ -1136,6 +1252,41 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     gap: '4px'
+  },
+  formSection: {
+    marginBottom: '8px'
+  },
+  formSectionLabel: {
+    fontSize: '12px',
+    fontWeight: 700,
+    textTransform: 'uppercase',
+    letterSpacing: '0.05em',
+    marginBottom: '8px',
+    display: 'block'
+  },
+  formDivider: {
+    height: '1px',
+    backgroundColor: '#ddd',
+    margin: '16px 0'
+  },
+  formHint: {
+    fontSize: '11px',
+    color: '#666',
+    marginTop: '6px',
+    fontStyle: 'italic'
+  },
+  linkedInInputWrapper: {
+    display: 'flex',
+    gap: '8px',
+    alignItems: 'center'
+  },
+  linkedInPreviewLink: {
+    fontSize: '12px',
+    color: '#000',
+    textDecoration: 'none',
+    whiteSpace: 'nowrap',
+    padding: '10px 12px',
+    border: '1px solid #000'
   },
   formLabel: {
     fontSize: '11px',
