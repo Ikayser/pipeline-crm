@@ -67,7 +67,7 @@ export default function CRMDashboard() {
   const handleSaveProspect = async (prospect) => {
     setSyncing(true);
     const data = {
-      company: prospect.company, contact: prospect.contact, title: prospect.title, linkedin: prospect.linkedin,
+      project_name: prospect.project_name, company: prospect.company, contact: prospect.contact, title: prospect.title, linkedin: prospect.linkedin,
       work_type: prospect.work_type, budget: prospect.budget, stage: prospect.stage, last_engagement: prospect.last_engagement,
       context: prospect.context, start_date: prospect.start_date, duration: prospect.duration, probability: prospect.probability
     };
@@ -103,8 +103,8 @@ export default function CRMDashboard() {
   };
 
   const handleExportCSV = () => {
-    const headers = ['Company', 'Contact', 'Title', 'LinkedIn', 'Work Type', 'Budget', 'Stage', 'Last Engagement', 'Start Date', 'Duration', 'Probability', 'Context'];
-    const rows = prospects.map(p => [p.company, p.contact, p.title || '', p.linkedin || '', p.work_type || '', p.budget, p.stage, p.last_engagement, p.start_date || '', p.duration || 1, p.probability || 50, p.context]);
+    const headers = ['Project Name', 'Company', 'Contact', 'Title', 'LinkedIn', 'Work Type', 'Budget', 'Stage', 'Last Engagement', 'Start Date', 'Duration', 'Probability', 'Context'];
+    const rows = prospects.map(p => [p.project_name || '', p.company, p.contact, p.title || '', p.linkedin || '', p.work_type || '', p.budget, p.stage, p.last_engagement, p.start_date || '', p.duration || 1, p.probability || 50, p.context]);
     const csv = [headers, ...rows].map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'prospects.csv'; a.click();
@@ -189,7 +189,7 @@ export default function CRMDashboard() {
                 <div style={styles.pipelineCards}>
                   {prospects.filter(p => p.stage === stage).map(prospect => (
                     <div key={prospect.id} style={{...styles.prospectCard, ...(daysSince(prospect.last_engagement) > 7 ? styles.prospectCardStale : {})}} onClick={() => setSelectedProspect(prospect)}>
-                      <div style={styles.cardCompany}>{prospect.company}</div>
+                      <div style={styles.cardCompany}>{prospect.project_name || prospect.company}</div>{prospect.project_name && <div style={styles.cardContact}>{prospect.company}</div>}
                       <div style={styles.cardContact}>{prospect.contact}</div>
                       {prospect.title && <div style={styles.cardTitle}>{prospect.title}</div>}
                       <div style={styles.cardMeta}><span>{parseWorkTypes(prospect.work_type).join(' + ') || '—'}</span><span>{formatCurrency(prospect.budget || 0)}</span></div>
@@ -207,13 +207,13 @@ export default function CRMDashboard() {
           <div style={styles.listView}>
             <table style={styles.table}>
               <thead><tr>
-                <th style={styles.th}>Company</th><th style={styles.th}>Contact</th><th style={styles.th}>Type</th><th style={styles.th}>Budget</th>
+                <th style={styles.th}>Project</th><th style={styles.th}>Company</th><th style={styles.th}>Contact</th><th style={styles.th}>Type</th><th style={styles.th}>Budget</th>
                 <th style={styles.th}>Prob.</th><th style={styles.th}>Start</th><th style={styles.th}>Duration</th><th style={styles.th}>Stage</th><th style={styles.th}>Last Contact</th>
               </tr></thead>
               <tbody>
                 {prospects.map(prospect => (
                   <tr key={prospect.id} style={styles.tr} onClick={() => setSelectedProspect(prospect)}>
-                    <td style={styles.td}>{prospect.company}</td>
+                    <td style={styles.td}>{prospect.project_name || '—'}</td><td style={styles.td}>{prospect.company}</td>
                     <td style={styles.td}>{prospect.contact}{prospect.linkedin && <a href={prospect.linkedin} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={styles.tableLinkIcon}>↗</a>}</td>
                     <td style={styles.tdSecondary}>{parseWorkTypes(prospect.work_type).join(', ') || '—'}</td>
                     <td style={styles.td}>{formatCurrency(prospect.budget || 0)}</td>
@@ -328,11 +328,11 @@ export default function CRMDashboard() {
         <div style={styles.overlay} onClick={() => setSelectedProspect(null)}>
           <div style={styles.sidebar} onClick={e => e.stopPropagation()}>
             <div style={styles.sidebarHeader}>
-              <h2 style={styles.sidebarTitle}>{selectedProspect.company}</h2>
+              <h2 style={styles.sidebarTitle}>{selectedProspect.project_name || selectedProspect.company}</h2>
               <button onClick={() => setSelectedProspect(null)} style={styles.closeButton}>×</button>
             </div>
             <div style={styles.sidebarContent}>
-              <div style={styles.detailSection}><label style={styles.detailLabel}>Contact</label><p style={styles.detailValue}>{selectedProspect.contact}</p>{selectedProspect.title && <p style={styles.detailValueSecondary}>{selectedProspect.title}</p>}</div>
+              <div style={styles.detailSection}><label style={styles.detailLabel}>Company</label><p style={styles.detailValue}>{selectedProspect.company}</p></div><div style={styles.detailSection}><label style={styles.detailLabel}>Contact</label><p style={styles.detailValue}>{selectedProspect.contact}</p>{selectedProspect.title && <p style={styles.detailValueSecondary}>{selectedProspect.title}</p>}</div>
               {selectedProspect.linkedin && <div style={styles.detailSection}><label style={styles.detailLabel}>LinkedIn</label><a href={selectedProspect.linkedin} target="_blank" rel="noopener noreferrer" style={styles.linkedInLink}>View Profile →</a></div>}
               <div style={styles.detailRow}>
                 <div style={styles.detailSection}><label style={styles.detailLabel}>Work Type</label><p style={styles.detailValue}>{parseWorkTypes(selectedProspect.work_type).join(' + ') || '—'}</p></div>
@@ -417,7 +417,7 @@ function AuthScreen() {
 }
 
 function ProspectForm({ prospect, onSave, onCancel }) {
-  const [form, setForm] = useState(prospect ? { ...prospect, work_type: prospect.work_type || '', last_engagement: prospect.last_engagement || new Date().toISOString().split('T')[0], start_date: prospect.start_date || '', duration: prospect.duration || 1, probability: prospect.probability || 50 } : { company: '', contact: '', linkedin: '', title: '', work_type: '', budget: 0, stage: 'Lead', last_engagement: new Date().toISOString().split('T')[0], context: '', start_date: '', duration: 1, probability: 50 });
+  const [form, setForm] = useState(prospect ? { ...prospect, project_name: prospect.project_name || '', work_type: prospect.work_type || '', last_engagement: prospect.last_engagement || new Date().toISOString().split('T')[0], start_date: prospect.start_date || '', duration: prospect.duration || 1, probability: prospect.probability || 50 } : { project_name: '', company: '', contact: '', linkedin: '', title: '', work_type: '', budget: 0, stage: 'Lead', last_engagement: new Date().toISOString().split('T')[0], context: '', start_date: '', duration: 1, probability: 50 });
   const selectedWorkTypes = form.work_type ? form.work_type.split(',').map(t => t.trim()).filter(Boolean) : [];
   const toggleWorkType = (type) => { const newTypes = selectedWorkTypes.includes(type) ? selectedWorkTypes.filter(t => t !== type) : [...selectedWorkTypes, type]; setForm({ ...form, work_type: newTypes.join(',') }); };
   const handleSubmit = (e) => { e.preventDefault(); onSave({ ...form, budget: Number(form.budget), duration: Number(form.duration), probability: Number(form.probability), start_date: form.start_date || null }); };
@@ -439,6 +439,7 @@ function ProspectForm({ prospect, onSave, onCancel }) {
             <div style={styles.formGroup}><label style={styles.formLabel}>Contact Name</label><input type="text" value={form.contact} onChange={e => setForm({ ...form, contact: e.target.value })} style={styles.input} required /></div>
             <div style={styles.formGroup}><label style={styles.formLabel}>Title / Role</label><input type="text" value={form.title || ''} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="e.g. VP of Engineering" style={styles.input} /></div>
           </div>
+          <div style={styles.formGroup}><label style={styles.formLabel}>Project Name</label><input type="text" value={form.project_name || ''} onChange={e => setForm({ ...form, project_name: e.target.value })} placeholder="e.g. Website Redesign" style={styles.input} /></div>
           <div style={styles.formGroup}><label style={styles.formLabel}>Company</label><input type="text" value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} style={styles.input} required /></div>
           <div style={styles.formGroup}>
             <label style={styles.formLabel}>Work Type</label>
