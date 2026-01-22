@@ -120,11 +120,12 @@ export default function CRMDashboard() {
     prospects.forEach(p => {
       if (!p.start_date || !p.budget) return;
       const startDate = new Date(p.start_date);
-      const duration = p.duration || 1;
-      const monthlyRevenue = p.budget / duration;
-      const monthlyRevenueWeighted = (p.budget * (p.probability || 50) / 100) / duration;
+      const durationWeeks = p.duration || 1;
+      const durationMonths = Math.ceil(durationWeeks / 4);
+      const monthlyRevenue = p.budget / durationMonths;
+      const monthlyRevenueWeighted = (p.budget * (p.probability || 50) / 100) / durationMonths;
       const workTypes = parseWorkTypes(p.work_type);
-      for (let i = 0; i < duration; i++) {
+      for (let i = 0; i < durationMonths; i++) {
         const revenueMonth = new Date(startDate.getFullYear(), startDate.getMonth() + i, 1);
         const monthIndex = months.findIndex(m => m.date.getMonth() === revenueMonth.getMonth() && m.date.getFullYear() === revenueMonth.getFullYear());
         if (monthIndex !== -1) {
@@ -136,7 +137,6 @@ export default function CRMDashboard() {
     });
     return months;
   };
-
   if (loading) return <div style={styles.authContainer}><div style={styles.authBox}><h1 style={styles.logo}>Pipeline</h1><p style={styles.authText}>Loading...</p></div></div>;
   if (!session) return <AuthScreen />;
 
@@ -219,7 +219,7 @@ export default function CRMDashboard() {
                     <td style={styles.td}>{formatCurrency(prospect.budget || 0)}</td>
                     <td style={styles.td}>{prospect.probability || 50}%</td>
                     <td style={styles.tdSecondary}>{formatDate(prospect.start_date)}</td>
-                    <td style={styles.tdSecondary}>{prospect.duration || 1}mo</td>
+                    <td style={styles.tdSecondary}>{prospect.duration || 1}wk</td>
                     <td style={styles.td}>{prospect.stage}</td>
                     <td style={{...styles.td, ...(daysSince(prospect.last_engagement) > 7 ? { fontWeight: 700 } : {})}}>{formatDate(prospect.last_engagement)} ({daysSince(prospect.last_engagement)}d)</td>
                   </tr>
@@ -344,7 +344,7 @@ export default function CRMDashboard() {
               </div>
               <div style={styles.detailRow}>
                 <div style={styles.detailSection}><label style={styles.detailLabel}>Start Date</label><p style={styles.detailValue}>{formatMonthYear(selectedProspect.start_date)}</p></div>
-                <div style={styles.detailSection}><label style={styles.detailLabel}>Duration</label><p style={styles.detailValue}>{selectedProspect.duration || 1} month{(selectedProspect.duration || 1) !== 1 ? 's' : ''}</p></div>
+                <div style={styles.detailSection}><label style={styles.detailLabel}>Duration</label><p style={styles.detailValue}>{selectedProspect.duration || 1} week{(selectedProspect.duration || 1) !== 1 ? 's' : ''}</p></div>
               </div>
               <div style={styles.detailSection}>
                 <label style={styles.detailLabel}>Stage</label>
@@ -454,7 +454,7 @@ function ProspectForm({ prospect, onSave, onCancel }) {
           </div>
           <div style={styles.formRow}>
             <div style={styles.formGroup}><label style={styles.formLabel}>Likely Start Date</label><input type="date" value={form.start_date || ''} onChange={e => setForm({ ...form, start_date: e.target.value })} style={styles.input} /></div>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Duration (months)</label><input type="number" min="1" value={form.duration} onChange={e => setForm({ ...form, duration: e.target.value })} style={styles.input} /></div>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Duration (weeks)</label><input type="number" min="1" value={form.duration} onChange={e => setForm({ ...form, duration: e.target.value })} style={styles.input} /></div>
           </div>
           <div style={styles.formRow}>
             <div style={styles.formGroup}><label style={styles.formLabel}>Stage</label><select value={form.stage} onChange={e => setForm({ ...form, stage: e.target.value })} style={styles.select}>{STAGES.map(s => <option key={s} value={s}>{s}</option>)}</select></div>
