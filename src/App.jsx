@@ -4,7 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 // Supabase client
 const supabase = createClient(
   'https://kpgjgbbozgmbhtysocck.supabase.co',
-  'sb_publishable_WDlEjZFkTlJXq1IJc1d1cg_T6YhTJ-m'
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtwZ2pnYmJvemdtYmh0eXNvY2NrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjkxMDA4OTIsImV4cCI6MjA4NDY3Njg5Mn0.JcABMK1Tcqm1gFmI8kxthDEDsSrflx4QONXXy-hAJGg'
 );
 
 const STAGES = ['Lead', 'Contacted', 'Meeting', 'Proposal', 'Negotiation', 'Closed'];
