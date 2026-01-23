@@ -9,13 +9,39 @@ const supabase = createClient(
 const STAGES = ['Lead', 'Contacted', 'Meeting', 'Proposal', 'Negotiation', 'Closed'];
 const PROJECT_STATUSES = ['Active', 'Completed', 'On Hold'];
 const WORK_TYPES = ['Strategy', 'Design'];
+const BILLABLE_RATE = 290; // $ per hour average
+
+// Generate next 12 months starting from current month
+const getNext12Months = () => {
+  const months = [];
+  const today = new Date();
+  for (let i = 0; i < 12; i++) {
+    const date = new Date(today.getFullYear(), today.getMonth() + i, 1);
+    months.push({
+      key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
+      label: date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
+      date
+    });
+  }
+  return months;
+};
+
+const MONTHS = getNext12Months();
+
+// Calculate FTEs needed: weekly revenue / billable rate / 40 hours
+const calculateFTE = (contractValue, durationWeeks) => {
+  if (!contractValue || !durationWeeks) return 0;
+  const weeklyRevenue = contractValue / durationWeeks;
+  return weeklyRevenue / BILLABLE_RATE / 40;
+};
 
 export default function CRMDashboard() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [masterTab, setMasterTab] = useState('pipeline'); // 'pipeline', 'projects', 'master-insights'
+  const [masterTab, setMasterTab] = useState('pipeline');
   const [prospects, setProspects] = useState([]);
   const [projects, setProjects] = useState([]);
+  const [settings, setSettings] = useState({ monthlyTargets: {}, currentStaff: 0, plannedHires: {} });
   const [view, setView] = useState('pipeline');
   const [projectView, setProjectView] = useState('list');
   const [selectedProspect, setSelectedProspect] = useState(null);
@@ -43,6 +69,7 @@ export default function CRMDashboard() {
     if (session) {
       loadProspects();
       loadProjects();
+      loadSettings();
     }
   }, [session]);
 
@@ -67,6 +94,30 @@ export default function CRMDashboard() {
     setProjects(projectsData || []);
   };
 
+  const loadSettings = async () => {
+    const { data, error } = await supabase.from('settings').select('*');
+    if (error) { console.error('Error loading settings:', error); return; }
+    const settingsObj = { monthlyTargets: {}, currentStaff: 0, plannedHires: {} };
+    data?.forEach(row => {
+      if (row.setting_key === 'monthlyTargets') settingsObj.monthlyTargets = row.setting_value || {};
+      if (row.setting_key === 'currentStaff') settingsObj.currentStaff = row.setting_value?.value || 0;
+      if (row.setting_key === 'plannedHires') settingsObj.plannedHires = row.setting_value || {};
+    });
+    setSettings(settingsObj);
+  };
+
+  const saveSettings = async (key, value) => {
+    setSyncing(true);
+    const { data: existing } = await supabase.from('settings').select('id').eq('setting_key', key).eq('user_id', session.user.id).single();
+    if (existing) {
+      await supabase.from('settings').update({ setting_value: value }).eq('id', existing.id);
+    } else {
+      await supabase.from('settings').insert({ user_id: session.user.id, setting_key: key, setting_value: value });
+    }
+    await loadSettings();
+    setSyncing(false);
+  };
+
   const formatCurrency = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(num || 0);
   const formatDate = (dateStr) => !dateStr ? '—' : new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const formatMonthYear = (dateStr) => !dateStr ? '—' : new Date(dateStr).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
@@ -76,6 +127,7 @@ export default function CRMDashboard() {
   const totalPipeline = prospects.reduce((sum, p) => sum + (p.budget || 0), 0);
   const weightedPipeline = prospects.reduce((sum, p) => sum + ((p.budget || 0) * (p.probability || 50) / 100), 0);
   const totalCommitted = projects.filter(p => p.status === 'Active').reduce((sum, p) => sum + (p.contract_value || 0), 0);
+  const annualTarget = MONTHS.reduce((sum, m) => sum + (settings.monthlyTargets[m.key] || 0), 0);
   
   const stageBreakdown = STAGES.map(stage => ({
     stage, count: prospects.filter(p => p.stage === stage).length,
@@ -89,7 +141,8 @@ export default function CRMDashboard() {
     const data = {
       project_name: prospect.project_name, company: prospect.company, contact: prospect.contact, title: prospect.title, linkedin: prospect.linkedin,
       work_type: prospect.work_type, budget: prospect.budget, stage: prospect.stage, last_engagement: prospect.last_engagement,
-      context: prospect.context, start_date: prospect.start_date, duration: prospect.duration, probability: prospect.probability
+      context: prospect.context, start_date: prospect.start_date, duration: prospect.duration, probability: prospect.probability,
+      staffing_fte: prospect.staffing_fte
     };
     if (prospect.id) {
       await supabase.from('prospects').update(data).eq('id', prospect.id);
@@ -137,7 +190,8 @@ export default function CRMDashboard() {
       duration: prospect.duration,
       status: 'Active',
       context: prospect.context,
-      prospect_id: prospect.id
+      prospect_id: prospect.id,
+      staffing_fte: prospect.staffing_fte
     };
     await supabase.from('projects').insert(projectData);
     await supabase.from('prospects').update({ stage: 'Closed' }).eq('id', prospect.id);
@@ -153,7 +207,7 @@ export default function CRMDashboard() {
     const data = {
       project_name: project.project_name, company: project.company, contact: project.contact, title: project.title, linkedin: project.linkedin,
       work_type: project.work_type, contract_value: project.contract_value, start_date: project.start_date,
-      duration: project.duration, status: project.status, context: project.context
+      duration: project.duration, status: project.status, context: project.context, staffing_fte: project.staffing_fte
     };
     if (project.id) {
       await supabase.from('projects').update(data).eq('id', project.id);
@@ -178,92 +232,81 @@ export default function CRMDashboard() {
     setSelectedProject({ ...project, status: newStatus }); setSyncing(false);
   };
 
-  // Projection calculations
-  const getWeeklyProjectionData = () => {
+  // Projection calculations with staffing
+  const getProjectionData = () => {
     const today = new Date();
-    const months = [];
-    for (let i = 0; i < 12; i++) {
-      const date = new Date(today.getFullYear(), today.getMonth() + i, 1);
-      months.push({ 
-        date, 
-        label: date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' }), 
-        committedStrategy: 0, committedDesign: 0,
-        pipelineStrategy: 0, pipelineDesign: 0,
-        pipelineStrategyWeighted: 0, pipelineDesignWeighted: 0
-      });
-    }
+    const months = MONTHS.map(m => ({ 
+      ...m,
+      committedRevenue: 0, pipelineRevenue: 0, pipelineRevenueWeighted: 0,
+      committedFTE: 0, pipelineFTE: 0, pipelineFTEWeighted: 0,
+      target: settings.monthlyTargets[m.key] || 0,
+      hires: settings.plannedHires[m.key] || 0
+    }));
 
-    // Add committed revenue from projects (weekly recognition)
+    // Add committed revenue and FTEs from projects
     projects.filter(p => p.status === 'Active').forEach(p => {
       if (!p.start_date || !p.contract_value) return;
       const startDate = new Date(p.start_date);
       const durationWeeks = p.duration || 1;
       const weeklyRevenue = p.contract_value / durationWeeks;
-      const workTypes = parseWorkTypes(p.work_type);
+      const weeklyFTE = p.staffing_fte != null ? p.staffing_fte / (durationWeeks / 4) : calculateFTE(p.contract_value, durationWeeks);
       
       for (let week = 0; week < durationWeeks; week++) {
         const revenueDate = new Date(startDate);
         revenueDate.setDate(revenueDate.getDate() + (week * 7));
-        const monthIndex = months.findIndex(m => 
-          m.date.getMonth() === revenueDate.getMonth() && 
-          m.date.getFullYear() === revenueDate.getFullYear()
-        );
+        const monthKey = `${revenueDate.getFullYear()}-${String(revenueDate.getMonth() + 1).padStart(2, '0')}`;
+        const monthIndex = months.findIndex(m => m.key === monthKey);
         if (monthIndex !== -1) {
-          const typeCount = workTypes.length || 1;
-          if (workTypes.includes('Strategy') || workTypes.length === 0) {
-            months[monthIndex].committedStrategy += weeklyRevenue / typeCount;
-          }
-          if (workTypes.includes('Design')) {
-            months[monthIndex].committedDesign += weeklyRevenue / typeCount;
-          }
+          months[monthIndex].committedRevenue += weeklyRevenue;
+          months[monthIndex].committedFTE += weeklyFTE / 4; // Convert weekly to monthly
         }
       }
     });
 
-    // Add pipeline revenue from prospects
-    prospects.forEach(p => {
+    // Add pipeline revenue and FTEs from prospects
+    prospects.filter(p => p.stage !== 'Closed').forEach(p => {
       if (!p.start_date || !p.budget) return;
       const startDate = new Date(p.start_date);
       const durationWeeks = p.duration || 1;
-      const durationMonths = Math.ceil(durationWeeks / 4);
-      const monthlyRevenue = p.budget / durationMonths;
-      const monthlyRevenueWeighted = (p.budget * (p.probability || 50) / 100) / durationMonths;
-      const workTypes = parseWorkTypes(p.work_type);
+      const probability = (p.probability || 50) / 100;
+      const weeklyRevenue = p.budget / durationWeeks;
+      const weeklyFTE = p.staffing_fte != null ? p.staffing_fte / (durationWeeks / 4) : calculateFTE(p.budget, durationWeeks);
       
-      for (let i = 0; i < durationMonths; i++) {
-        const revenueMonth = new Date(startDate.getFullYear(), startDate.getMonth() + i, 1);
-        const monthIndex = months.findIndex(m => 
-          m.date.getMonth() === revenueMonth.getMonth() && 
-          m.date.getFullYear() === revenueMonth.getFullYear()
-        );
+      for (let week = 0; week < durationWeeks; week++) {
+        const revenueDate = new Date(startDate);
+        revenueDate.setDate(revenueDate.getDate() + (week * 7));
+        const monthKey = `${revenueDate.getFullYear()}-${String(revenueDate.getMonth() + 1).padStart(2, '0')}`;
+        const monthIndex = months.findIndex(m => m.key === monthKey);
         if (monthIndex !== -1) {
-          const typeCount = workTypes.length || 1;
-          if (workTypes.includes('Strategy') || workTypes.length === 0) {
-            months[monthIndex].pipelineStrategy += monthlyRevenue / typeCount;
-            months[monthIndex].pipelineStrategyWeighted += monthlyRevenueWeighted / typeCount;
-          }
-          if (workTypes.includes('Design')) {
-            months[monthIndex].pipelineDesign += monthlyRevenue / typeCount;
-            months[monthIndex].pipelineDesignWeighted += monthlyRevenueWeighted / typeCount;
-          }
+          months[monthIndex].pipelineRevenue += weeklyRevenue;
+          months[monthIndex].pipelineRevenueWeighted += weeklyRevenue * probability;
+          months[monthIndex].pipelineFTE += weeklyFTE / 4;
+          months[monthIndex].pipelineFTEWeighted += (weeklyFTE / 4) * probability;
         }
       }
+    });
+
+    // Calculate cumulative available staff
+    let cumulativeHires = 0;
+    months.forEach(m => {
+      cumulativeHires += m.hires;
+      m.availableStaff = settings.currentStaff + cumulativeHires;
     });
 
     return months;
   };
 
   const handleExportCSV = () => {
-    const headers = ['Project Name', 'Company', 'Contact', 'Title', 'LinkedIn', 'Work Type', 'Budget', 'Stage', 'Last Engagement', 'Start Date', 'Duration', 'Probability', 'Context'];
-    const rows = prospects.map(p => [p.project_name || '', p.company, p.contact, p.title || '', p.linkedin || '', p.work_type || '', p.budget, p.stage, p.last_engagement, p.start_date || '', p.duration || 1, p.probability || 50, p.context]);
+    const headers = ['Project Name', 'Company', 'Contact', 'Title', 'LinkedIn', 'Work Type', 'Budget', 'Stage', 'Last Engagement', 'Start Date', 'Duration', 'Probability', 'Staffing FTE', 'Context'];
+    const rows = prospects.map(p => [p.project_name || '', p.company, p.contact, p.title || '', p.linkedin || '', p.work_type || '', p.budget, p.stage, p.last_engagement, p.start_date || '', p.duration || 1, p.probability || 50, p.staffing_fte || '', p.context]);
     const csv = [headers, ...rows].map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'prospects.csv'; a.click();
   };
 
   const handleExportProjectsCSV = () => {
-    const headers = ['Project Name', 'Company', 'Contact', 'Title', 'Work Type', 'Contract Value', 'Start Date', 'Duration (weeks)', 'Status', 'Context'];
-    const rows = projects.map(p => [p.project_name || '', p.company, p.contact || '', p.title || '', p.work_type || '', p.contract_value, p.start_date || '', p.duration || 1, p.status, p.context || '']);
+    const headers = ['Project Name', 'Company', 'Contact', 'Title', 'Work Type', 'Contract Value', 'Start Date', 'Duration (weeks)', 'Status', 'Staffing FTE', 'Context'];
+    const rows = projects.map(p => [p.project_name || '', p.company, p.contact || '', p.title || '', p.work_type || '', p.contract_value, p.start_date || '', p.duration || 1, p.status, p.staffing_fte || '', p.context || '']);
     const csv = [headers, ...rows].map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'projects.csv'; a.click();
@@ -272,12 +315,9 @@ export default function CRMDashboard() {
   if (loading) return <div style={styles.authContainer}><div style={styles.authBox}><h1 style={styles.logo}>Pipeline</h1><p style={styles.authText}>Loading...</p></div></div>;
   if (!session) return <AuthScreen />;
 
-  const projectionData = getWeeklyProjectionData();
-  const maxProjection = Math.max(...projectionData.map(m => {
-    const committed = m.committedStrategy + m.committedDesign;
-    const pipeline = showWeighted ? (m.pipelineStrategyWeighted + m.pipelineDesignWeighted) : (m.pipelineStrategy + m.pipelineDesign);
-    return committed + pipeline;
-  }), 1);
+  const projectionData = getProjectionData();
+  const maxRevenue = Math.max(...projectionData.map(m => m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : m.pipelineRevenue)), ...projectionData.map(m => m.target), 1);
+  const maxFTE = Math.max(...projectionData.map(m => Math.max(m.availableStaff, m.committedFTE + (showWeighted ? m.pipelineFTEWeighted : m.pipelineFTE))), 1);
 
   return (
     <div style={styles.container}>
@@ -298,6 +338,7 @@ export default function CRMDashboard() {
         <button onClick={() => setMasterTab('pipeline')} style={{...styles.masterTab, ...(masterTab === 'pipeline' ? styles.masterTabActive : {})}}>Pipeline</button>
         <button onClick={() => setMasterTab('projects')} style={{...styles.masterTab, ...(masterTab === 'projects' ? styles.masterTabActive : {})}}>Projects</button>
         <button onClick={() => setMasterTab('master-insights')} style={{...styles.masterTab, ...(masterTab === 'master-insights' ? styles.masterTabActive : {})}}>Master Insights</button>
+        <button onClick={() => setMasterTab('settings')} style={{...styles.masterTab, ...(masterTab === 'settings' ? styles.masterTabActive : {})}}>Settings</button>
       </div>
 
       {/* PIPELINE TAB */}
@@ -355,23 +396,28 @@ export default function CRMDashboard() {
                 <table style={styles.table}>
                   <thead><tr>
                     <th style={styles.th}>Project</th><th style={styles.th}>Company</th><th style={styles.th}>Contact</th><th style={styles.th}>Type</th><th style={styles.th}>Budget</th>
-                    <th style={styles.th}>Prob.</th><th style={styles.th}>Start</th><th style={styles.th}>Duration</th><th style={styles.th}>Stage</th><th style={styles.th}>Last Contact</th>
+                    <th style={styles.th}>Prob.</th><th style={styles.th}>FTEs</th><th style={styles.th}>Start</th><th style={styles.th}>Duration</th><th style={styles.th}>Stage</th><th style={styles.th}>Last Contact</th>
                   </tr></thead>
                   <tbody>
-                    {prospects.map(prospect => (
-                      <tr key={prospect.id} style={styles.tr} onClick={() => setSelectedProspect(prospect)}>
-                        <td style={styles.td}>{prospect.project_name || '—'}</td>
-                        <td style={styles.td}>{prospect.company}</td>
-                        <td style={styles.td}>{prospect.contact}{prospect.linkedin && <a href={prospect.linkedin} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={styles.tableLinkIcon}>↗</a>}</td>
-                        <td style={styles.tdSecondary}>{parseWorkTypes(prospect.work_type).join(', ') || '—'}</td>
-                        <td style={styles.td}>{formatCurrency(prospect.budget)}</td>
-                        <td style={styles.td}>{prospect.probability || 50}%</td>
-                        <td style={styles.tdSecondary}>{formatDate(prospect.start_date)}</td>
-                        <td style={styles.tdSecondary}>{prospect.duration || 1}wk</td>
-                        <td style={styles.td}>{prospect.stage}</td>
-                        <td style={{...styles.td, ...(daysSince(prospect.last_engagement) > 7 ? { fontWeight: 700 } : {})}}>{formatDate(prospect.last_engagement)} ({daysSince(prospect.last_engagement)}d)</td>
-                      </tr>
-                    ))}
+                    {prospects.map(prospect => {
+                      const autoFTE = calculateFTE(prospect.budget, prospect.duration);
+                      const displayFTE = prospect.staffing_fte != null ? prospect.staffing_fte : autoFTE;
+                      return (
+                        <tr key={prospect.id} style={styles.tr} onClick={() => setSelectedProspect(prospect)}>
+                          <td style={styles.td}>{prospect.project_name || '—'}</td>
+                          <td style={styles.td}>{prospect.company}</td>
+                          <td style={styles.td}>{prospect.contact}{prospect.linkedin && <a href={prospect.linkedin} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={styles.tableLinkIcon}>↗</a>}</td>
+                          <td style={styles.tdSecondary}>{parseWorkTypes(prospect.work_type).join(', ') || '—'}</td>
+                          <td style={styles.td}>{formatCurrency(prospect.budget)}</td>
+                          <td style={styles.td}>{prospect.probability || 50}%</td>
+                          <td style={styles.td}>{displayFTE.toFixed(1)}</td>
+                          <td style={styles.tdSecondary}>{formatDate(prospect.start_date)}</td>
+                          <td style={styles.tdSecondary}>{prospect.duration || 1}wk</td>
+                          <td style={styles.td}>{prospect.stage}</td>
+                          <td style={{...styles.td, ...(daysSince(prospect.last_engagement) > 7 ? { fontWeight: 700 } : {})}}>{formatDate(prospect.last_engagement)} ({daysSince(prospect.last_engagement)}d)</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -386,25 +432,17 @@ export default function CRMDashboard() {
                     <button onClick={() => setShowWeighted(true)} style={{...styles.toggleButton, ...(showWeighted ? styles.toggleButtonActive : {})}}>Weighted</button>
                   </div>
                 </div>
-                <div style={styles.chartLegend}>
-                  <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#000'}} /><span>Strategy</span></div>
-                  <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#666'}} /><span>Design</span></div>
-                </div>
                 <div style={styles.chartContainer}>
-                  <div style={styles.chartYAxis}><span>{formatCurrency(maxProjection)}</span><span>{formatCurrency(maxProjection / 2)}</span><span>$0</span></div>
+                  <div style={styles.chartYAxis}><span>{formatCurrency(maxRevenue)}</span><span>{formatCurrency(maxRevenue / 2)}</span><span>$0</span></div>
                   <div style={styles.chart}>
                     {projectionData.map((month, idx) => {
-                      const strategyVal = showWeighted ? month.pipelineStrategyWeighted : month.pipelineStrategy;
-                      const designVal = showWeighted ? month.pipelineDesignWeighted : month.pipelineDesign;
-                      const total = strategyVal + designVal;
+                      const pipeline = showWeighted ? month.pipelineRevenueWeighted : month.pipelineRevenue;
                       return (
                         <div key={idx} style={styles.chartBar}>
                           <div style={styles.chartBarStack}>
-                            <div style={{...styles.chartBarSegment, height: `${maxProjection ? (designVal / maxProjection) * 100 : 0}%`, backgroundColor: '#666'}} />
-                            <div style={{...styles.chartBarSegment, height: `${maxProjection ? (strategyVal / maxProjection) * 100 : 0}%`, backgroundColor: '#000'}} />
+                            <div style={{...styles.chartBarSegment, height: `${maxRevenue ? (pipeline / maxRevenue) * 100 : 0}%`, backgroundColor: '#999'}} />
                           </div>
                           <div style={styles.chartBarLabel}>{month.label}</div>
-                          {total > 0 && <div style={styles.chartBarValue}>{formatCurrency(total)}</div>}
                         </div>
                       );
                     })}
@@ -441,28 +479,6 @@ export default function CRMDashboard() {
                     </div>
                   )}
                 </div>
-                <div style={styles.insightCard}>
-                  <h3 style={styles.insightTitle}>Work Type Breakdown</h3>
-                  <div style={styles.typeList}>
-                    {WORK_TYPES.map(type => {
-                      const typeProspects = prospects.filter(p => parseWorkTypes(p.work_type).includes(type));
-                      const count = typeProspects.length;
-                      const value = typeProspects.reduce((sum, p) => sum + ((p.budget || 0) / (parseWorkTypes(p.work_type).length || 1)), 0);
-                      if (count === 0) return null;
-                      return <div key={type} style={styles.typeRow}><span style={styles.typeName}>{type}</span><span style={styles.typeCount}>{count}</span><span style={styles.typeValue}>{formatCurrency(value)}</span></div>;
-                    })}
-                  </div>
-                </div>
-                <div style={styles.insightCard}>
-                  <h3 style={styles.insightTitle}>Probability Distribution</h3>
-                  <div style={styles.typeList}>
-                    {[{ label: 'High (75-100%)', min: 75, max: 100 }, { label: 'Medium (50-74%)', min: 50, max: 74 }, { label: 'Low (25-49%)', min: 25, max: 49 }, { label: 'Very Low (0-24%)', min: 0, max: 24 }].map(({ label, min, max }) => {
-                      const filtered = prospects.filter(p => (p.probability || 50) >= min && (p.probability || 50) <= max);
-                      if (filtered.length === 0) return null;
-                      return <div key={label} style={styles.typeRow}><span style={styles.typeName}>{label}</span><span style={styles.typeCount}>{filtered.length}</span><span style={styles.typeValue}>{formatCurrency(filtered.reduce((sum, p) => sum + (p.budget || 0), 0))}</span></div>;
-                    })}
-                  </div>
-                </div>
               </div>
             )}
           </main>
@@ -498,21 +514,26 @@ export default function CRMDashboard() {
                 <table style={styles.table}>
                   <thead><tr>
                     <th style={styles.th}>Project</th><th style={styles.th}>Company</th><th style={styles.th}>Contact</th><th style={styles.th}>Type</th>
-                    <th style={styles.th}>Contract Value</th><th style={styles.th}>Start</th><th style={styles.th}>Duration</th><th style={styles.th}>Status</th>
+                    <th style={styles.th}>Contract Value</th><th style={styles.th}>FTEs</th><th style={styles.th}>Start</th><th style={styles.th}>Duration</th><th style={styles.th}>Status</th>
                   </tr></thead>
                   <tbody>
-                    {projects.map(project => (
-                      <tr key={project.id} style={styles.tr} onClick={() => setSelectedProject(project)}>
-                        <td style={styles.td}>{project.project_name || '—'}</td>
-                        <td style={styles.td}>{project.company}</td>
-                        <td style={styles.td}>{project.contact || '—'}</td>
-                        <td style={styles.tdSecondary}>{parseWorkTypes(project.work_type).join(', ') || '—'}</td>
-                        <td style={styles.td}>{formatCurrency(project.contract_value)}</td>
-                        <td style={styles.tdSecondary}>{formatDate(project.start_date)}</td>
-                        <td style={styles.tdSecondary}>{project.duration || 1}wk</td>
-                        <td style={{...styles.td, fontWeight: project.status === 'Active' ? 700 : 400}}>{project.status}</td>
-                      </tr>
-                    ))}
+                    {projects.map(project => {
+                      const autoFTE = calculateFTE(project.contract_value, project.duration);
+                      const displayFTE = project.staffing_fte != null ? project.staffing_fte : autoFTE;
+                      return (
+                        <tr key={project.id} style={styles.tr} onClick={() => setSelectedProject(project)}>
+                          <td style={styles.td}>{project.project_name || '—'}</td>
+                          <td style={styles.td}>{project.company}</td>
+                          <td style={styles.td}>{project.contact || '—'}</td>
+                          <td style={styles.tdSecondary}>{parseWorkTypes(project.work_type).join(', ') || '—'}</td>
+                          <td style={styles.td}>{formatCurrency(project.contract_value)}</td>
+                          <td style={styles.td}>{displayFTE.toFixed(1)}</td>
+                          <td style={styles.tdSecondary}>{formatDate(project.start_date)}</td>
+                          <td style={styles.tdSecondary}>{project.duration || 1}wk</td>
+                          <td style={{...styles.td, fontWeight: project.status === 'Active' ? 700 : 400}}>{project.status}</td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -523,32 +544,22 @@ export default function CRMDashboard() {
                 <div style={styles.projectionHeader}>
                   <h2 style={styles.projectionTitle}>Committed Revenue (Weekly Recognition)</h2>
                 </div>
-                <div style={styles.chartLegend}>
-                  <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#000'}} /><span>Strategy</span></div>
-                  <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#666'}} /><span>Design</span></div>
-                </div>
                 <div style={styles.chartContainer}>
-                  <div style={styles.chartYAxis}><span>{formatCurrency(maxProjection)}</span><span>{formatCurrency(maxProjection / 2)}</span><span>$0</span></div>
+                  <div style={styles.chartYAxis}><span>{formatCurrency(maxRevenue)}</span><span>{formatCurrency(maxRevenue / 2)}</span><span>$0</span></div>
                   <div style={styles.chart}>
-                    {projectionData.map((month, idx) => {
-                      const total = month.committedStrategy + month.committedDesign;
-                      return (
-                        <div key={idx} style={styles.chartBar}>
-                          <div style={styles.chartBarStack}>
-                            <div style={{...styles.chartBarSegment, height: `${maxProjection ? (month.committedDesign / maxProjection) * 100 : 0}%`, backgroundColor: '#666'}} />
-                            <div style={{...styles.chartBarSegment, height: `${maxProjection ? (month.committedStrategy / maxProjection) * 100 : 0}%`, backgroundColor: '#000'}} />
-                          </div>
-                          <div style={styles.chartBarLabel}>{month.label}</div>
-                          {total > 0 && <div style={styles.chartBarValue}>{formatCurrency(total)}</div>}
+                    {projectionData.map((month, idx) => (
+                      <div key={idx} style={styles.chartBar}>
+                        <div style={styles.chartBarStack}>
+                          <div style={{...styles.chartBarSegment, height: `${maxRevenue ? (month.committedRevenue / maxRevenue) * 100 : 0}%`, backgroundColor: '#000'}} />
                         </div>
-                      );
-                    })}
+                        <div style={styles.chartBarLabel}>{month.label}</div>
+                        {month.committedRevenue > 0 && <div style={styles.chartBarValue}>{formatCurrency(month.committedRevenue)}</div>}
+                      </div>
+                    ))}
                   </div>
                 </div>
                 <div style={styles.projectionSummary}>
-                  <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>12-Month Committed</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedStrategy + m.committedDesign, 0))}</span></div>
-                  <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Strategy</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedStrategy, 0))}</span></div>
-                  <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Design</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedDesign, 0))}</span></div>
+                  <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>12-Month Committed</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedRevenue, 0))}</span></div>
                 </div>
               </div>
             )}
@@ -556,12 +567,17 @@ export default function CRMDashboard() {
         </>
       )}
 
+      {/* SETTINGS TAB */}
+      {masterTab === 'settings' && (
+        <SettingsPanel settings={settings} onSave={saveSettings} formatCurrency={formatCurrency} />
+      )}
+
       {/* MASTER INSIGHTS TAB */}
       {masterTab === 'master-insights' && (
         <>
           <nav style={styles.nav}>
             <div style={styles.navLinks}>
-              <span style={styles.navLabel}>Combined Revenue View</span>
+              <span style={styles.navLabel}>Combined Revenue & Staffing View</span>
             </div>
             <div style={styles.navActions}>
               <div style={styles.projectionToggle}>
@@ -576,33 +592,35 @@ export default function CRMDashboard() {
             <div style={styles.statDivider} />
             <div style={styles.stat}><span style={styles.statLabel}>{showWeighted ? 'Weighted' : 'Total'} Pipeline</span><span style={styles.statValue}>{formatCurrency(showWeighted ? weightedPipeline : totalPipeline)}</span></div>
             <div style={styles.statDivider} />
-            <div style={styles.stat}><span style={styles.statLabel}>Combined</span><span style={styles.statValue}>{formatCurrency(totalCommitted + (showWeighted ? weightedPipeline : totalPipeline))}</span></div>
+            <div style={styles.stat}><span style={styles.statLabel}>Annual Target</span><span style={styles.statValue}>{formatCurrency(annualTarget)}</span></div>
+            <div style={styles.statDivider} />
+            <div style={styles.stat}><span style={styles.statLabel}>Current Staff</span><span style={styles.statValue}>{settings.currentStaff}</span></div>
           </div>
 
           <main style={styles.main}>
+            {/* Revenue Chart */}
             <div style={styles.projectionsView}>
               <div style={styles.projectionHeader}>
-                <h2 style={styles.projectionTitle}>Committed + {showWeighted ? 'Weighted' : 'Estimated'} Pipeline</h2>
+                <h2 style={styles.projectionTitle}>Revenue vs Target</h2>
               </div>
               <div style={styles.chartLegend}>
                 <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#000'}} /><span>Committed</span></div>
                 <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#999'}} /><span>Pipeline</span></div>
+                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: 'transparent', border: '2px solid #c00'}} /><span>Target</span></div>
               </div>
               <div style={styles.chartContainer}>
-                <div style={styles.chartYAxis}><span>{formatCurrency(maxProjection)}</span><span>{formatCurrency(maxProjection / 2)}</span><span>$0</span></div>
+                <div style={styles.chartYAxis}><span>{formatCurrency(maxRevenue)}</span><span>{formatCurrency(maxRevenue / 2)}</span><span>$0</span></div>
                 <div style={styles.chart}>
                   {projectionData.map((month, idx) => {
-                    const committed = month.committedStrategy + month.committedDesign;
-                    const pipeline = showWeighted 
-                      ? month.pipelineStrategyWeighted + month.pipelineDesignWeighted 
-                      : month.pipelineStrategy + month.pipelineDesign;
-                    const total = committed + pipeline;
+                    const pipeline = showWeighted ? month.pipelineRevenueWeighted : month.pipelineRevenue;
+                    const total = month.committedRevenue + pipeline;
                     return (
                       <div key={idx} style={styles.chartBar}>
                         <div style={styles.chartBarStack}>
-                          <div style={{...styles.chartBarSegment, height: `${maxProjection ? (pipeline / maxProjection) * 100 : 0}%`, backgroundColor: '#999'}} />
-                          <div style={{...styles.chartBarSegment, height: `${maxProjection ? (committed / maxProjection) * 100 : 0}%`, backgroundColor: '#000'}} />
+                          <div style={{...styles.chartBarSegment, height: `${maxRevenue ? (pipeline / maxRevenue) * 100 : 0}%`, backgroundColor: '#999'}} />
+                          <div style={{...styles.chartBarSegment, height: `${maxRevenue ? (month.committedRevenue / maxRevenue) * 100 : 0}%`, backgroundColor: '#000'}} />
                         </div>
+                        {month.target > 0 && <div style={{...styles.targetLine, bottom: `${(month.target / maxRevenue) * 100}%`}} />}
                         <div style={styles.chartBarLabel}>{month.label}</div>
                         {total > 0 && <div style={styles.chartBarValue}>{formatCurrency(total)}</div>}
                       </div>
@@ -611,40 +629,88 @@ export default function CRMDashboard() {
                 </div>
               </div>
               <div style={styles.projectionSummary}>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>12-Month Total</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => {
-                  const committed = m.committedStrategy + m.committedDesign;
-                  const pipeline = showWeighted ? m.pipelineStrategyWeighted + m.pipelineDesignWeighted : m.pipelineStrategy + m.pipelineDesign;
-                  return sum + committed + pipeline;
-                }, 0))}</span></div>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Committed</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedStrategy + m.committedDesign, 0))}</span></div>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>{showWeighted ? 'Weighted' : 'Estimated'} Pipeline</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => sum + (showWeighted ? m.pipelineStrategyWeighted + m.pipelineDesignWeighted : m.pipelineStrategy + m.pipelineDesign), 0))}</span></div>
+                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>12-Month Total</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : m.pipelineRevenue), 0))}</span></div>
+                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>12-Month Target</span><span style={styles.projectionSummaryValue}>{formatCurrency(annualTarget)}</span></div>
+                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Gap</span><span style={{...styles.projectionSummaryValue, color: projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : m.pipelineRevenue), 0) >= annualTarget ? '#060' : '#c00'}}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : m.pipelineRevenue), 0) - annualTarget)}</span></div>
               </div>
+            </div>
 
-              {/* Work Type Breakdown */}
-              <div style={{...styles.insightsGrid, marginTop: '32px'}}>
-                <div style={styles.insightCard}>
-                  <h3 style={styles.insightTitle}>Committed by Type</h3>
-                  <div style={styles.typeList}>
-                    {WORK_TYPES.map(type => {
-                      const value = projectionData.reduce((sum, m) => sum + (type === 'Strategy' ? m.committedStrategy : m.committedDesign), 0);
-                      if (value === 0) return null;
-                      return <div key={type} style={styles.typeRow}><span style={styles.typeName}>{type}</span><span style={styles.typeCount}></span><span style={styles.typeValue}>{formatCurrency(value)}</span></div>;
-                    })}
-                  </div>
+            {/* Staffing Chart */}
+            <div style={{...styles.projectionsView, marginTop: '48px'}}>
+              <div style={styles.projectionHeader}>
+                <h2 style={styles.projectionTitle}>Staffing: Available vs Needed</h2>
+              </div>
+              <div style={styles.chartLegend}>
+                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#000'}} /><span>Committed FTEs</span></div>
+                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#999'}} /><span>Pipeline FTEs</span></div>
+                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: 'transparent', border: '2px solid #060'}} /><span>Available Staff</span></div>
+              </div>
+              <div style={styles.chartContainer}>
+                <div style={styles.chartYAxis}><span>{maxFTE.toFixed(1)}</span><span>{(maxFTE / 2).toFixed(1)}</span><span>0</span></div>
+                <div style={styles.chart}>
+                  {projectionData.map((month, idx) => {
+                    const pipelineFTE = showWeighted ? month.pipelineFTEWeighted : month.pipelineFTE;
+                    return (
+                      <div key={idx} style={styles.chartBar}>
+                        <div style={styles.chartBarStack}>
+                          <div style={{...styles.chartBarSegment, height: `${maxFTE ? (pipelineFTE / maxFTE) * 100 : 0}%`, backgroundColor: '#999'}} />
+                          <div style={{...styles.chartBarSegment, height: `${maxFTE ? (month.committedFTE / maxFTE) * 100 : 0}%`, backgroundColor: '#000'}} />
+                        </div>
+                        <div style={{...styles.availableStaffLine, bottom: `${(month.availableStaff / maxFTE) * 100}%`}} />
+                        <div style={styles.chartBarLabel}>{month.label}</div>
+                        <div style={styles.chartBarValue}>{(month.committedFTE + pipelineFTE).toFixed(1)}</div>
+                      </div>
+                    );
+                  })}
                 </div>
-                <div style={styles.insightCard}>
-                  <h3 style={styles.insightTitle}>Pipeline by Type</h3>
-                  <div style={styles.typeList}>
-                    {WORK_TYPES.map(type => {
-                      const value = projectionData.reduce((sum, m) => {
-                        if (showWeighted) return sum + (type === 'Strategy' ? m.pipelineStrategyWeighted : m.pipelineDesignWeighted);
-                        return sum + (type === 'Strategy' ? m.pipelineStrategy : m.pipelineDesign);
-                      }, 0);
-                      if (value === 0) return null;
-                      return <div key={type} style={styles.typeRow}><span style={styles.typeName}>{type}</span><span style={styles.typeCount}></span><span style={styles.typeValue}>{formatCurrency(value)}</span></div>;
+              </div>
+              <div style={styles.projectionSummary}>
+                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Current Staff</span><span style={styles.projectionSummaryValue}>{settings.currentStaff}</span></div>
+                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Planned Hires (12mo)</span><span style={styles.projectionSummaryValue}>{MONTHS.reduce((sum, m) => sum + (settings.plannedHires[m.key] || 0), 0)}</span></div>
+                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>End of Year Staff</span><span style={styles.projectionSummaryValue}>{projectionData[11]?.availableStaff || settings.currentStaff}</span></div>
+              </div>
+            </div>
+
+            {/* Monthly Breakdown Table */}
+            <div style={{marginTop: '48px'}}>
+              <h3 style={styles.insightTitle}>Monthly Breakdown</h3>
+              <div style={styles.listView}>
+                <table style={styles.table}>
+                  <thead><tr>
+                    <th style={styles.th}>Month</th>
+                    <th style={styles.th}>Target</th>
+                    <th style={styles.th}>Committed</th>
+                    <th style={styles.th}>Pipeline</th>
+                    <th style={styles.th}>Total</th>
+                    <th style={styles.th}>Gap</th>
+                    <th style={styles.th}>FTEs Needed</th>
+                    <th style={styles.th}>Staff Available</th>
+                    <th style={styles.th}>Staffing Gap</th>
+                  </tr></thead>
+                  <tbody>
+                    {projectionData.map((month, idx) => {
+                      const pipeline = showWeighted ? month.pipelineRevenueWeighted : month.pipelineRevenue;
+                      const pipelineFTE = showWeighted ? month.pipelineFTEWeighted : month.pipelineFTE;
+                      const total = month.committedRevenue + pipeline;
+                      const revenueGap = total - month.target;
+                      const neededFTE = month.committedFTE + pipelineFTE;
+                      const staffingGap = month.availableStaff - neededFTE;
+                      return (
+                        <tr key={idx} style={styles.tr}>
+                          <td style={styles.td}>{month.label}</td>
+                          <td style={styles.td}>{formatCurrency(month.target)}</td>
+                          <td style={styles.td}>{formatCurrency(month.committedRevenue)}</td>
+                          <td style={styles.tdSecondary}>{formatCurrency(pipeline)}</td>
+                          <td style={styles.td}>{formatCurrency(total)}</td>
+                          <td style={{...styles.td, color: revenueGap >= 0 ? '#060' : '#c00', fontWeight: 600}}>{formatCurrency(revenueGap)}</td>
+                          <td style={styles.td}>{neededFTE.toFixed(1)}</td>
+                          <td style={styles.td}>{month.availableStaff}</td>
+                          <td style={{...styles.td, color: staffingGap >= 0 ? '#060' : '#c00', fontWeight: 600}}>{staffingGap >= 0 ? '+' : ''}{staffingGap.toFixed(1)}</td>
+                        </tr>
+                      );
                     })}
-                  </div>
-                </div>
+                  </tbody>
+                </table>
               </div>
             </div>
           </main>
@@ -674,6 +740,10 @@ export default function CRMDashboard() {
               <div style={styles.detailRow}>
                 <div style={styles.detailSection}><label style={styles.detailLabel}>Start Date</label><p style={styles.detailValue}>{formatMonthYear(selectedProspect.start_date)}</p></div>
                 <div style={styles.detailSection}><label style={styles.detailLabel}>Duration</label><p style={styles.detailValue}>{selectedProspect.duration || 1} week{(selectedProspect.duration || 1) !== 1 ? 's' : ''}</p></div>
+              </div>
+              <div style={styles.detailSection}>
+                <label style={styles.detailLabel}>Staffing (FTEs)</label>
+                <p style={styles.detailValue}>{selectedProspect.staffing_fte != null ? selectedProspect.staffing_fte.toFixed(1) : calculateFTE(selectedProspect.budget, selectedProspect.duration).toFixed(1)} {selectedProspect.staffing_fte == null && <span style={styles.autoLabel}>(auto)</span>}</p>
               </div>
               <div style={styles.detailSection}>
                 <label style={styles.detailLabel}>Stage</label>
@@ -723,6 +793,10 @@ export default function CRMDashboard() {
                 <div style={styles.detailSection}><label style={styles.detailLabel}>Duration</label><p style={styles.detailValue}>{selectedProject.duration || 1} week{(selectedProject.duration || 1) !== 1 ? 's' : ''}</p></div>
               </div>
               <div style={styles.detailSection}>
+                <label style={styles.detailLabel}>Staffing (FTEs)</label>
+                <p style={styles.detailValue}>{selectedProject.staffing_fte != null ? selectedProject.staffing_fte.toFixed(1) : calculateFTE(selectedProject.contract_value, selectedProject.duration).toFixed(1)} {selectedProject.staffing_fte == null && <span style={styles.autoLabel}>(auto)</span>}</p>
+              </div>
+              <div style={styles.detailSection}>
                 <label style={styles.detailLabel}>Weekly Revenue</label>
                 <p style={styles.detailValue}>{formatCurrency((selectedProject.contract_value || 0) / (selectedProject.duration || 1))}</p>
               </div>
@@ -749,238 +823,98 @@ export default function CRMDashboard() {
   );
 }
 
-function AuthScreen() {
-  const [isSignUp, setIsSignUp] = useState(false);
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [message, setMessage] = useState('');
-  const [loading, setLoading] = useState(false);
+function SettingsPanel({ settings, onSave, formatCurrency }) {
+  const [monthlyTargets, setMonthlyTargets] = useState(settings.monthlyTargets || {});
+  const [currentStaff, setCurrentStaff] = useState(settings.currentStaff || 0);
+  const [plannedHires, setPlannedHires] = useState(settings.plannedHires || {});
+  const [saving, setSaving] = useState(false);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault(); setError(''); setMessage(''); setLoading(true);
-    if (isSignUp) {
-      const { error } = await supabase.auth.signUp({ email, password });
-      if (error) setError(error.message); else setMessage('Check your email for the confirmation link.');
-    } else {
-      const { error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) setError(error.message);
-    }
-    setLoading(false);
+  useEffect(() => {
+    setMonthlyTargets(settings.monthlyTargets || {});
+    setCurrentStaff(settings.currentStaff || 0);
+    setPlannedHires(settings.plannedHires || {});
+  }, [settings]);
+
+  const handleSaveAll = async () => {
+    setSaving(true);
+    await onSave('monthlyTargets', monthlyTargets);
+    await onSave('currentStaff', { value: currentStaff });
+    await onSave('plannedHires', plannedHires);
+    setSaving(false);
   };
 
-  return (
-    <div style={styles.authContainer}>
-      <div style={styles.authBox}>
-        <h1 style={styles.logo}>Pipeline</h1>
-        <p style={styles.authTagline}>Business Tracker</p>
-        <form onSubmit={handleSubmit} style={styles.authForm}>
-          <div style={styles.formGroup}><label style={styles.formLabel}>Email</label><input type="email" value={email} onChange={e => setEmail(e.target.value)} style={styles.input} required /></div>
-          <div style={styles.formGroup}><label style={styles.formLabel}>Password</label><input type="password" value={password} onChange={e => setPassword(e.target.value)} style={styles.input} required minLength={6} /></div>
-          {error && <p style={styles.authError}>{error}</p>}
-          {message && <p style={styles.authMessage}>{message}</p>}
-          <button type="submit" style={styles.actionButtonPrimary} disabled={loading}>{loading ? 'Loading...' : (isSignUp ? 'Sign Up' : 'Sign In')}</button>
-        </form>
-        <button onClick={() => { setIsSignUp(!isSignUp); setError(''); setMessage(''); }} style={styles.authToggle}>{isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Sign Up"}</button>
-      </div>
-    </div>
-  );
-}
-
-function ProspectForm({ prospect, onSave, onCancel }) {
-  const [form, setForm] = useState(prospect ? { ...prospect, project_name: prospect.project_name || '', work_type: prospect.work_type || '', last_engagement: prospect.last_engagement || new Date().toISOString().split('T')[0], start_date: prospect.start_date || '', duration: prospect.duration || 1, probability: prospect.probability || 50 } : { project_name: '', company: '', contact: '', linkedin: '', title: '', work_type: '', budget: 0, stage: 'Lead', last_engagement: new Date().toISOString().split('T')[0], context: '', start_date: '', duration: 1, probability: 50 });
-  const selectedWorkTypes = form.work_type ? form.work_type.split(',').map(t => t.trim()).filter(Boolean) : [];
-  const toggleWorkType = (type) => { const newTypes = selectedWorkTypes.includes(type) ? selectedWorkTypes.filter(t => t !== type) : [...selectedWorkTypes, type]; setForm({ ...form, work_type: newTypes.join(',') }); };
-  const handleSubmit = (e) => { e.preventDefault(); onSave({ ...form, budget: Number(form.budget), duration: Number(form.duration), probability: Number(form.probability), start_date: form.start_date || null }); };
+  const annualTarget = MONTHS.reduce((sum, m) => sum + (monthlyTargets[m.key] || 0), 0);
+  const totalHires = MONTHS.reduce((sum, m) => sum + (plannedHires[m.key] || 0), 0);
 
   return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={e => e.stopPropagation()}>
-        <h2 style={styles.modalTitle}>{prospect ? 'Edit Prospect' : 'New Prospect'}</h2>
-        <form onSubmit={handleSubmit} style={styles.form}>
-          <div style={styles.formSection}>
-            <label style={styles.formSectionLabel}>LinkedIn Profile</label>
-            <div style={styles.linkedInInputWrapper}>
-              <input type="url" value={form.linkedin || ''} onChange={e => setForm({ ...form, linkedin: e.target.value })} placeholder="https://linkedin.com/in/username" style={styles.input} />
-              {form.linkedin && <a href={form.linkedin} target="_blank" rel="noopener noreferrer" style={styles.linkedInPreviewLink}>Open →</a>}
-            </div>
-          </div>
-          <div style={styles.formDivider} />
-          <div style={styles.formGroup}><label style={styles.formLabel}>Project Name</label><input type="text" value={form.project_name || ''} onChange={e => setForm({ ...form, project_name: e.target.value })} placeholder="e.g. Website Redesign" style={styles.input} /></div>
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Contact Name</label><input type="text" value={form.contact} onChange={e => setForm({ ...form, contact: e.target.value })} style={styles.input} required /></div>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Title / Role</label><input type="text" value={form.title || ''} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="e.g. VP of Engineering" style={styles.input} /></div>
-          </div>
-          <div style={styles.formGroup}><label style={styles.formLabel}>Company</label><input type="text" value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} style={styles.input} required /></div>
+    <main style={styles.main}>
+      <div style={styles.settingsContainer}>
+        <div style={styles.settingsHeader}>
+          <h2 style={styles.projectionTitle}>Settings</h2>
+          <button onClick={handleSaveAll} style={styles.actionButtonPrimary} disabled={saving}>{saving ? 'Saving...' : 'Save All'}</button>
+        </div>
+
+        {/* Current Staff */}
+        <div style={styles.settingsSection}>
+          <h3 style={styles.insightTitle}>Current Billable Staff</h3>
           <div style={styles.formGroup}>
-            <label style={styles.formLabel}>Work Type</label>
-            <div style={styles.workTypeSelector}>
-              {WORK_TYPES.map(type => <button key={type} type="button" onClick={() => toggleWorkType(type)} style={{...styles.workTypeButton, ...(selectedWorkTypes.includes(type) ? styles.workTypeButtonActive : {})}}>{type}</button>)}
-            </div>
+            <label style={styles.formLabel}>Number of FTEs</label>
+            <input 
+              type="number" 
+              value={currentStaff} 
+              onChange={e => setCurrentStaff(Number(e.target.value))} 
+              style={{...styles.input, width: '120px'}} 
+              min="0"
+              step="0.5"
+            />
           </div>
-          <div style={styles.formDivider} />
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Estimated Budget</label><input type="number" value={form.budget} onChange={e => setForm({ ...form, budget: e.target.value })} style={styles.input} /></div>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Probability (%)</label><input type="number" min="0" max="100" value={form.probability} onChange={e => setForm({ ...form, probability: e.target.value })} style={styles.input} /></div>
+        </div>
+
+        {/* Monthly Targets */}
+        <div style={styles.settingsSection}>
+          <h3 style={styles.insightTitle}>Monthly Revenue Targets</h3>
+          <p style={styles.settingsSubtitle}>Annual Target: {formatCurrency(annualTarget)}</p>
+          <div style={styles.monthGrid}>
+            {MONTHS.map(month => (
+              <div key={month.key} style={styles.monthInputGroup}>
+                <label style={styles.formLabel}>{month.label}</label>
+                <input
+                  type="number"
+                  value={monthlyTargets[month.key] || ''}
+                  onChange={e => setMonthlyTargets({ ...monthlyTargets, [month.key]: Number(e.target.value) || 0 })}
+                  style={styles.input}
+                  placeholder="0"
+                />
+              </div>
+            ))}
           </div>
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Likely Start Date</label><input type="date" value={form.start_date || ''} onChange={e => setForm({ ...form, start_date: e.target.value })} style={styles.input} /></div>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Duration (weeks)</label><input type="number" min="1" value={form.duration} onChange={e => setForm({ ...form, duration: e.target.value })} style={styles.input} /></div>
+        </div>
+
+        {/* Planned Hires */}
+        <div style={styles.settingsSection}>
+          <h3 style={styles.insightTitle}>Planned Hires by Month</h3>
+          <p style={styles.settingsSubtitle}>Total Planned Hires: {totalHires} → End of Year Staff: {currentStaff + totalHires}</p>
+          <div style={styles.monthGrid}>
+            {MONTHS.map(month => (
+              <div key={month.key} style={styles.monthInputGroup}>
+                <label style={styles.formLabel}>{month.label}</label>
+                <input
+                  type="number"
+                  value={plannedHires[month.key] || ''}
+                  onChange={e => setPlannedHires({ ...plannedHires, [month.key]: Number(e.target.value) || 0 })}
+                  style={styles.input}
+                  placeholder="0"
+                  min="0"
+                />
+              </div>
+            ))}
           </div>
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Stage</label><select value={form.stage} onChange={e => setForm({ ...form, stage: e.target.value })} style={styles.select}>{STAGES.map(s => <option key={s} value={s}>{s}</option>)}</select></div>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Last Engagement</label><input type="date" value={form.last_engagement} onChange={e => setForm({ ...form, last_engagement: e.target.value })} style={styles.input} /></div>
-          </div>
-          <div style={styles.formGroup}><label style={styles.formLabel}>Context & Notes</label><textarea value={form.context || ''} onChange={e => setForm({ ...form, context: e.target.value })} style={styles.textarea} rows={3} placeholder="Key interests, how you met, decision-making process, etc." /></div>
-          <div style={styles.formActions}><button type="button" onClick={onCancel} style={styles.actionButton}>Cancel</button><button type="submit" style={styles.actionButtonPrimary}>Save</button></div>
-        </form>
+        </div>
       </div>
-    </div>
+    </main>
   );
 }
-
-function ProjectForm({ project, onSave, onCancel }) {
-  const [form, setForm] = useState(project ? { ...project, project_name: project.project_name || '', work_type: project.work_type || '', start_date: project.start_date || '', duration: project.duration || 1, status: project.status || 'Active' } : { project_name: '', company: '', contact: '', linkedin: '', title: '', work_type: '', contract_value: 0, start_date: '', duration: 1, status: 'Active', context: '' });
-  const selectedWorkTypes = form.work_type ? form.work_type.split(',').map(t => t.trim()).filter(Boolean) : [];
-  const toggleWorkType = (type) => { const newTypes = selectedWorkTypes.includes(type) ? selectedWorkTypes.filter(t => t !== type) : [...selectedWorkTypes, type]; setForm({ ...form, work_type: newTypes.join(',') }); };
-  const handleSubmit = (e) => { e.preventDefault(); onSave({ ...form, contract_value: Number(form.contract_value), duration: Number(form.duration), start_date: form.start_date || null }); };
-
-  return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={e => e.stopPropagation()}>
-        <h2 style={styles.modalTitle}>{project ? 'Edit Project' : 'New Project'}</h2>
-        <form onSubmit={handleSubmit} style={styles.form}>
-          <div style={styles.formGroup}><label style={styles.formLabel}>Project Name</label><input type="text" value={form.project_name || ''} onChange={e => setForm({ ...form, project_name: e.target.value })} placeholder="e.g. Website Redesign" style={styles.input} /></div>
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Company</label><input type="text" value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} style={styles.input} required /></div>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Contact Name</label><input type="text" value={form.contact || ''} onChange={e => setForm({ ...form, contact: e.target.value })} style={styles.input} /></div>
-          </div>
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Title / Role</label><input type="text" value={form.title || ''} onChange={e => setForm({ ...form, title: e.target.value })} style={styles.input} /></div>
-            <div style={styles.formGroup}><label style={styles.formLabel}>LinkedIn</label><input type="url" value={form.linkedin || ''} onChange={e => setForm({ ...form, linkedin: e.target.value })} style={styles.input} /></div>
-          </div>
-          <div style={styles.formGroup}>
-            <label style={styles.formLabel}>Work Type</label>
-            <div style={styles.workTypeSelector}>
-              {WORK_TYPES.map(type => <button key={type} type="button" onClick={() => toggleWorkType(type)} style={{...styles.workTypeButton, ...(selectedWorkTypes.includes(type) ? styles.workTypeButtonActive : {})}}>{type}</button>)}
-            </div>
-          </div>
-          <div style={styles.formDivider} />
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Contract Value</label><input type="number" value={form.contract_value} onChange={e => setForm({ ...form, contract_value: e.target.value })} style={styles.input} /></div>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Status</label><select value={form.status} onChange={e => setForm({ ...form, status: e.target.value })} style={styles.select}>{PROJECT_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}</select></div>
-          </div>
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Start Date</label><input type="date" value={form.start_date || ''} onChange={e => setForm({ ...form, start_date: e.target.value })} style={styles.input} /></div>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Duration (weeks)</label><input type="number" min="1" value={form.duration} onChange={e => setForm({ ...form, duration: e.target.value })} style={styles.input} /></div>
-          </div>
-          <div style={styles.formGroup}><label style={styles.formLabel}>Context & Notes</label><textarea value={form.context || ''} onChange={e => setForm({ ...form, context: e.target.value })} style={styles.textarea} rows={3} /></div>
-          <div style={styles.formActions}><button type="button" onClick={onCancel} style={styles.actionButton}>Cancel</button><button type="submit" style={styles.actionButtonPrimary}>Save</button></div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-function EngagementForm({ onSave, onCancel }) {
-  const [form, setForm] = useState({ date: new Date().toISOString().split('T')[0], type: 'Email', note: '' });
-  const handleSubmit = (e) => { e.preventDefault(); onSave(form); };
-  return (
-    <div style={styles.overlay} onClick={onCancel}>
-      <div style={styles.modal} onClick={e => e.stopPropagation()}>
-        <h2 style={styles.modalTitle}>Log Engagement</h2>
-        <form onSubmit={handleSubmit} style={styles.form}>
-          <div style={styles.formRow}>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Date</label><input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} style={styles.input} /></div>
-            <div style={styles.formGroup}><label style={styles.formLabel}>Type</label><select value={form.type} onChange={e => setForm({ ...form, type: e.target.value })} style={styles.select}>{['Email', 'Call', 'Meeting', 'LinkedIn', 'Other'].map(t => <option key={t} value={t}>{t}</option>)}</select></div>
-          </div>
-          <div style={styles.formGroup}><label style={styles.formLabel}>Note</label><textarea value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} style={styles.textarea} rows={2} /></div>
-          <div style={styles.formActions}><button type="button" onClick={onCancel} style={styles.actionButton}>Cancel</button><button type="submit" style={styles.actionButtonPrimary}>Save</button></div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
-const styles = {
-  container: { fontFamily: '"Helvetica Neue", Helvetica, Arial, sans-serif', fontSize: '14px', lineHeight: 1.5, color: '#000', backgroundColor: '#fff', minHeight: '100vh', letterSpacing: '-0.01em' },
-  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '24px 32px', borderBottom: '1px solid #000' },
-  headerLeft: { display: 'flex', alignItems: 'baseline', gap: '16px' },
-  logo: { fontSize: '24px', fontWeight: 700, margin: 0, letterSpacing: '-0.02em' },
-  tagline: { fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#666' },
-  syncIndicator: { fontSize: '11px', color: '#666', marginLeft: '16px' },
-  headerRight: { display: 'flex', alignItems: 'center', gap: '16px' },
-  userEmail: { fontSize: '12px', color: '#666' },
-  signOutButton: { padding: '6px 12px', fontSize: '11px', background: 'none', border: '1px solid #ddd', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit' },
-  masterTabs: { display: 'flex', borderBottom: '1px solid #000' },
-  masterTab: { padding: '16px 32px', fontSize: '14px', fontWeight: 700, background: 'none', border: 'none', borderBottom: '3px solid transparent', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit', color: '#666' },
-  masterTabActive: { color: '#000', borderBottomColor: '#000', backgroundColor: '#f9f9f9' },
-  nav: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 32px', borderBottom: '1px solid #ddd' },
-  navLinks: { display: 'flex' },
-  navLink: { background: 'none', border: 'none', borderBottom: '2px solid transparent', padding: '16px 24px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#666', fontFamily: 'inherit' },
-  navLinkActive: { color: '#000', borderBottomColor: '#000' },
-  navLabel: { padding: '16px 24px', fontSize: '13px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#000' },
-  navActions: { display: 'flex', gap: '12px', alignItems: 'center' },
-  actionButton: { padding: '8px 16px', fontSize: '12px', background: 'none', border: '1px solid #000', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit' },
-  actionButtonPrimary: { padding: '8px 16px', fontSize: '12px', background: '#000', color: '#fff', border: '1px solid #000', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit' },
-  statsBar: { display: 'flex', alignItems: 'center', padding: '20px 32px', borderBottom: '1px solid #ddd', gap: '32px' },
-  stat: { display: 'flex', flexDirection: 'column', gap: '4px' },
-  statLabel: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#666' },
-  statValue: { fontSize: '24px', fontWeight: 700, letterSpacing: '-0.02em' },
-  statDivider: { width: '1px', height: '40px', backgroundColor: '#ddd' },
-  main: { padding: '32px' },
-  pipelineGrid: { display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '1px', backgroundColor: '#000' },
-  pipelineColumn: { backgroundColor: '#fff', padding: '16px', minHeight: '400px' },
-  pipelineHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' },
-  stageName: { fontSize: '12px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' },
-  stageCount: { fontSize: '11px', color: '#666' },
-  stageValue: { fontSize: '16px', fontWeight: 500, marginBottom: '16px', paddingBottom: '16px', borderBottom: '1px solid #eee' },
-  pipelineCards: { display: 'flex', flexDirection: 'column', gap: '8px' },
-  prospectCard: { padding: '12px', border: '1px solid #ddd', cursor: 'pointer', transition: 'border-color 0.15s' },
-  prospectCardStale: { borderColor: '#000', borderWidth: '2px' },
-  cardCompany: { fontWeight: 700, marginBottom: '2px' },
-  cardContact: { fontSize: '12px', color: '#666', marginBottom: '2px' },
-  cardTitle: { fontSize: '11px', color: '#999', marginBottom: '8px' },
-  cardMeta: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#666' },
-  cardProbability: { fontSize: '10px', color: '#999', marginTop: '4px' },
-  cardEngagement: { fontSize: '10px', color: '#999', marginTop: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' },
-  listView: { overflowX: 'auto' },
-  table: { width: '100%', borderCollapse: 'collapse' },
-  th: { textAlign: 'left', padding: '12px 16px', borderBottom: '2px solid #000', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700 },
-  tr: { cursor: 'pointer', transition: 'background 0.15s' },
-  td: { padding: '12px 16px', borderBottom: '1px solid #eee' },
-  tdSecondary: { padding: '12px 16px', borderBottom: '1px solid #eee', color: '#666', fontSize: '13px' },
-  tableLinkIcon: { marginLeft: '6px', color: '#000', textDecoration: 'none', fontSize: '11px' },
-  projectionsView: { maxWidth: '1000px' },
-  projectionHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' },
-  projectionTitle: { fontSize: '18px', fontWeight: 700, margin: 0 },
-  projectionToggle: { display: 'flex', border: '1px solid #000' },
-  toggleButton: { padding: '8px 16px', fontSize: '12px', background: 'none', border: 'none', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit' },
-  toggleButtonActive: { backgroundColor: '#000', color: '#fff' },
-  chartLegend: { display: 'flex', gap: '24px', marginBottom: '16px' },
-  legendItem: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' },
-  legendColor: { width: '16px', height: '16px' },
-  chartContainer: { display: 'flex', gap: '16px', marginBottom: '32px' },
-  chartYAxis: { display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: '11px', color: '#666', textAlign: 'right', paddingBottom: '24px' },
-  chart: { flex: 1, display: 'flex', gap: '8px', alignItems: 'flex-end', height: '300px', borderBottom: '1px solid #000', borderLeft: '1px solid #000', paddingLeft: '8px' },
-  chartBar: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%' },
-  chartBarStack: { flex: 1, width: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' },
-  chartBarSegment: { width: '100%', transition: 'height 0.3s' },
-  chartBarLabel: { fontSize: '10px', marginTop: '8px', color: '#666' },
-  chartBarValue: { fontSize: '9px', color: '#999', marginTop: '2px' },
-  projectionSummary: { display: 'flex', gap: '32px', padding: '24px', border: '1px solid #000' },
-  projectionSummaryItem: { display: 'flex', flexDirection: 'column', gap: '4px' },
-  projectionSummaryLabel: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#666' },
-  projectionSummaryValue: { fontSize: '20px', fontWeight: 700 },
-  insightsGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '24px' },
-  insightCard: { border: '1px solid #000', padding: '24px' },
-  insightTitle: { fontSize: '14px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: 0, marginBottom: '16px' },
-  insightSubtitle: { fontSize: '12px', color: '#666', marginBottom: '16px' },
-  barChart: { display: 'flex', flexDirection: 'column', gap: '12px' },
-  barRow: { display: 'grid', gridTemplateColumns: '80px 1fr 80px', alignItems: 'center', gap: '12px' },
-  barLabel: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em' },
-  barTrack: { height: '8px', backgroundColor: '#eee' },
-  barFill: { height: '100%', backgroundColor: '#000', transition: 'width 0.3s' },
+: 'width 0.3s' },
   barValue: { fontSize: '12px', textAlign: 'right' },
   attentionList: { display: 'flex', flexDirection: 'column', gap: '8px' },
   attentionItem: { display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #eee', cursor: 'pointer' },
@@ -1034,6 +968,13 @@ const styles = {
   workTypeSelector: { display: 'flex', gap: '8px' },
   workTypeButton: { padding: '10px 20px', fontSize: '12px', background: 'none', border: '1px solid #ddd', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit' },
   workTypeButtonActive: { backgroundColor: '#000', color: '#fff', borderColor: '#000' },
+  autoLabel: { fontSize: '10px', color: '#999', fontWeight: 400 },
+  settingsContainer: { maxWidth: '800px' },
+  settingsHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '32px' },
+  settingsSection: { marginBottom: '48px', padding: '24px', border: '1px solid #000' },
+  settingsSubtitle: { fontSize: '12px', color: '#666', marginBottom: '16px' },
+  monthGrid: { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '16px' },
+  monthInputGroup: { display: 'flex', flexDirection: 'column', gap: '4px' },
   authContainer: { minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: '"Helvetica Neue", Helvetica, Arial, sans-serif', backgroundColor: '#fff' },
   authBox: { width: '320px', padding: '48px 32px', border: '1px solid #000' },
   authTagline: { fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#666', marginTop: '8px', marginBottom: '32px' },
