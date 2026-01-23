@@ -914,7 +914,275 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
     </main>
   );
 }
-: 'width 0.3s' },
+
+function AuthScreen() {
+  const [isSignUp, setIsSignUp] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault(); setError(''); setMessage(''); setLoading(true);
+    if (isSignUp) {
+      const { error } = await supabase.auth.signUp({ email, password });
+      if (error) setError(error.message); else setMessage('Check your email for the confirmation link.');
+    } else {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) setError(error.message);
+    }
+    setLoading(false);
+  };
+
+  return (
+    <div style={styles.authContainer}>
+      <div style={styles.authBox}>
+        <h1 style={styles.logo}>Pipeline</h1>
+        <p style={styles.authTagline}>Business Tracker</p>
+        <form onSubmit={handleSubmit} style={styles.authForm}>
+          <div style={styles.formGroup}><label style={styles.formLabel}>Email</label><input type="email" value={email} onChange={e => setEmail(e.target.value)} style={styles.input} required /></div>
+          <div style={styles.formGroup}><label style={styles.formLabel}>Password</label><input type="password" value={password} onChange={e => setPassword(e.target.value)} style={styles.input} required minLength={6} /></div>
+          {error && <p style={styles.authError}>{error}</p>}
+          {message && <p style={styles.authMessage}>{message}</p>}
+          <button type="submit" style={styles.actionButtonPrimary} disabled={loading}>{loading ? 'Loading...' : (isSignUp ? 'Sign Up' : 'Sign In')}</button>
+        </form>
+        <button onClick={() => { setIsSignUp(!isSignUp); setError(''); setMessage(''); }} style={styles.authToggle}>{isSignUp ? 'Already have an account? Sign In' : "Don't have an account? Sign Up"}</button>
+      </div>
+    </div>
+  );
+}
+
+function ProspectForm({ prospect, onSave, onCancel }) {
+  const autoFTE = prospect ? calculateFTE(prospect.budget, prospect.duration) : 0;
+  const [form, setForm] = useState(prospect ? { ...prospect, project_name: prospect.project_name || '', work_type: prospect.work_type || '', last_engagement: prospect.last_engagement || new Date().toISOString().split('T')[0], start_date: prospect.start_date || '', duration: prospect.duration || 1, probability: prospect.probability || 50, staffing_fte: prospect.staffing_fte } : { project_name: '', company: '', contact: '', linkedin: '', title: '', work_type: '', budget: 0, stage: 'Lead', last_engagement: new Date().toISOString().split('T')[0], context: '', start_date: '', duration: 1, probability: 50, staffing_fte: null });
+  const selectedWorkTypes = form.work_type ? form.work_type.split(',').map(t => t.trim()).filter(Boolean) : [];
+  const toggleWorkType = (type) => { const newTypes = selectedWorkTypes.includes(type) ? selectedWorkTypes.filter(t => t !== type) : [...selectedWorkTypes, type]; setForm({ ...form, work_type: newTypes.join(',') }); };
+  
+  const calculatedFTE = calculateFTE(form.budget, form.duration);
+  
+  const handleSubmit = (e) => { 
+    e.preventDefault(); 
+    onSave({ 
+      ...form, 
+      budget: Number(form.budget), 
+      duration: Number(form.duration), 
+      probability: Number(form.probability), 
+      start_date: form.start_date || null,
+      staffing_fte: form.staffing_fte !== null && form.staffing_fte !== '' ? Number(form.staffing_fte) : null
+    }); 
+  };
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={e => e.stopPropagation()}>
+        <h2 style={styles.modalTitle}>{prospect ? 'Edit Prospect' : 'New Prospect'}</h2>
+        <form onSubmit={handleSubmit} style={styles.form}>
+          <div style={styles.formSection}>
+            <label style={styles.formSectionLabel}>LinkedIn Profile</label>
+            <div style={styles.linkedInInputWrapper}>
+              <input type="url" value={form.linkedin || ''} onChange={e => setForm({ ...form, linkedin: e.target.value })} placeholder="https://linkedin.com/in/username" style={styles.input} />
+              {form.linkedin && <a href={form.linkedin} target="_blank" rel="noopener noreferrer" style={styles.linkedInPreviewLink}>Open →</a>}
+            </div>
+          </div>
+          <div style={styles.formDivider} />
+          <div style={styles.formGroup}><label style={styles.formLabel}>Project Name</label><input type="text" value={form.project_name || ''} onChange={e => setForm({ ...form, project_name: e.target.value })} placeholder="e.g. Website Redesign" style={styles.input} /></div>
+          <div style={styles.formRow}>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Contact Name</label><input type="text" value={form.contact} onChange={e => setForm({ ...form, contact: e.target.value })} style={styles.input} required /></div>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Title / Role</label><input type="text" value={form.title || ''} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="e.g. VP of Engineering" style={styles.input} /></div>
+          </div>
+          <div style={styles.formGroup}><label style={styles.formLabel}>Company</label><input type="text" value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} style={styles.input} required /></div>
+          <div style={styles.formGroup}>
+            <label style={styles.formLabel}>Work Type</label>
+            <div style={styles.workTypeSelector}>
+              {WORK_TYPES.map(type => <button key={type} type="button" onClick={() => toggleWorkType(type)} style={{...styles.workTypeButton, ...(selectedWorkTypes.includes(type) ? styles.workTypeButtonActive : {})}}>{type}</button>)}
+            </div>
+          </div>
+          <div style={styles.formDivider} />
+          <div style={styles.formRow}>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Estimated Budget</label><input type="number" value={form.budget} onChange={e => setForm({ ...form, budget: e.target.value })} style={styles.input} /></div>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Probability (%)</label><input type="number" min="0" max="100" value={form.probability} onChange={e => setForm({ ...form, probability: e.target.value })} style={styles.input} /></div>
+          </div>
+          <div style={styles.formRow}>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Likely Start Date</label><input type="date" value={form.start_date || ''} onChange={e => setForm({ ...form, start_date: e.target.value })} style={styles.input} /></div>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Duration (weeks)</label><input type="number" min="1" value={form.duration} onChange={e => setForm({ ...form, duration: e.target.value })} style={styles.input} /></div>
+          </div>
+          <div style={styles.formRow}>
+            <div style={styles.formGroup}>
+              <label style={styles.formLabel}>Staffing (FTEs) <span style={styles.autoLabel}>Auto: {calculatedFTE.toFixed(1)}</span></label>
+              <input type="number" step="0.1" min="0" value={form.staffing_fte !== null ? form.staffing_fte : ''} onChange={e => setForm({ ...form, staffing_fte: e.target.value })} placeholder={calculatedFTE.toFixed(1)} style={styles.input} />
+            </div>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Stage</label><select value={form.stage} onChange={e => setForm({ ...form, stage: e.target.value })} style={styles.select}>{STAGES.map(s => <option key={s} value={s}>{s}</option>)}</select></div>
+          </div>
+          <div style={styles.formGroup}><label style={styles.formLabel}>Last Engagement</label><input type="date" value={form.last_engagement} onChange={e => setForm({ ...form, last_engagement: e.target.value })} style={styles.input} /></div>
+          <div style={styles.formGroup}><label style={styles.formLabel}>Context & Notes</label><textarea value={form.context || ''} onChange={e => setForm({ ...form, context: e.target.value })} style={styles.textarea} rows={3} placeholder="Key interests, how you met, decision-making process, etc." /></div>
+          <div style={styles.formActions}><button type="button" onClick={onCancel} style={styles.actionButton}>Cancel</button><button type="submit" style={styles.actionButtonPrimary}>Save</button></div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function ProjectForm({ project, onSave, onCancel }) {
+  const [form, setForm] = useState(project ? { ...project, project_name: project.project_name || '', work_type: project.work_type || '', start_date: project.start_date || '', duration: project.duration || 1, status: project.status || 'Active', staffing_fte: project.staffing_fte } : { project_name: '', company: '', contact: '', linkedin: '', title: '', work_type: '', contract_value: 0, start_date: '', duration: 1, status: 'Active', context: '', staffing_fte: null });
+  const selectedWorkTypes = form.work_type ? form.work_type.split(',').map(t => t.trim()).filter(Boolean) : [];
+  const toggleWorkType = (type) => { const newTypes = selectedWorkTypes.includes(type) ? selectedWorkTypes.filter(t => t !== type) : [...selectedWorkTypes, type]; setForm({ ...form, work_type: newTypes.join(',') }); };
+  
+  const calculatedFTE = calculateFTE(form.contract_value, form.duration);
+  
+  const handleSubmit = (e) => { 
+    e.preventDefault(); 
+    onSave({ 
+      ...form, 
+      contract_value: Number(form.contract_value), 
+      duration: Number(form.duration), 
+      start_date: form.start_date || null,
+      staffing_fte: form.staffing_fte !== null && form.staffing_fte !== '' ? Number(form.staffing_fte) : null
+    }); 
+  };
+
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={e => e.stopPropagation()}>
+        <h2 style={styles.modalTitle}>{project ? 'Edit Project' : 'New Project'}</h2>
+        <form onSubmit={handleSubmit} style={styles.form}>
+          <div style={styles.formGroup}><label style={styles.formLabel}>Project Name</label><input type="text" value={form.project_name || ''} onChange={e => setForm({ ...form, project_name: e.target.value })} placeholder="e.g. Website Redesign" style={styles.input} /></div>
+          <div style={styles.formRow}>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Company</label><input type="text" value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} style={styles.input} required /></div>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Contact Name</label><input type="text" value={form.contact || ''} onChange={e => setForm({ ...form, contact: e.target.value })} style={styles.input} /></div>
+          </div>
+          <div style={styles.formRow}>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Title / Role</label><input type="text" value={form.title || ''} onChange={e => setForm({ ...form, title: e.target.value })} style={styles.input} /></div>
+            <div style={styles.formGroup}><label style={styles.formLabel}>LinkedIn</label><input type="url" value={form.linkedin || ''} onChange={e => setForm({ ...form, linkedin: e.target.value })} style={styles.input} /></div>
+          </div>
+          <div style={styles.formGroup}>
+            <label style={styles.formLabel}>Work Type</label>
+            <div style={styles.workTypeSelector}>
+              {WORK_TYPES.map(type => <button key={type} type="button" onClick={() => toggleWorkType(type)} style={{...styles.workTypeButton, ...(selectedWorkTypes.includes(type) ? styles.workTypeButtonActive : {})}}>{type}</button>)}
+            </div>
+          </div>
+          <div style={styles.formDivider} />
+          <div style={styles.formRow}>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Contract Value</label><input type="number" value={form.contract_value} onChange={e => setForm({ ...form, contract_value: e.target.value })} style={styles.input} /></div>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Status</label><select value={form.status} onChange={e => setForm({ ...form, status: e.target.value })} style={styles.select}>{PROJECT_STATUSES.map(s => <option key={s} value={s}>{s}</option>)}</select></div>
+          </div>
+          <div style={styles.formRow}>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Start Date</label><input type="date" value={form.start_date || ''} onChange={e => setForm({ ...form, start_date: e.target.value })} style={styles.input} /></div>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Duration (weeks)</label><input type="number" min="1" value={form.duration} onChange={e => setForm({ ...form, duration: e.target.value })} style={styles.input} /></div>
+          </div>
+          <div style={styles.formGroup}>
+            <label style={styles.formLabel}>Staffing (FTEs) <span style={styles.autoLabel}>Auto: {calculatedFTE.toFixed(1)}</span></label>
+            <input type="number" step="0.1" min="0" value={form.staffing_fte !== null ? form.staffing_fte : ''} onChange={e => setForm({ ...form, staffing_fte: e.target.value })} placeholder={calculatedFTE.toFixed(1)} style={styles.input} />
+          </div>
+          <div style={styles.formGroup}><label style={styles.formLabel}>Context & Notes</label><textarea value={form.context || ''} onChange={e => setForm({ ...form, context: e.target.value })} style={styles.textarea} rows={3} /></div>
+          <div style={styles.formActions}><button type="button" onClick={onCancel} style={styles.actionButton}>Cancel</button><button type="submit" style={styles.actionButtonPrimary}>Save</button></div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function EngagementForm({ onSave, onCancel }) {
+  const [form, setForm] = useState({ date: new Date().toISOString().split('T')[0], type: 'Email', note: '' });
+  const handleSubmit = (e) => { e.preventDefault(); onSave(form); };
+  return (
+    <div style={styles.overlay} onClick={onCancel}>
+      <div style={styles.modal} onClick={e => e.stopPropagation()}>
+        <h2 style={styles.modalTitle}>Log Engagement</h2>
+        <form onSubmit={handleSubmit} style={styles.form}>
+          <div style={styles.formRow}>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Date</label><input type="date" value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} style={styles.input} /></div>
+            <div style={styles.formGroup}><label style={styles.formLabel}>Type</label><select value={form.type} onChange={e => setForm({ ...form, type: e.target.value })} style={styles.select}>{['Email', 'Call', 'Meeting', 'LinkedIn', 'Other'].map(t => <option key={t} value={t}>{t}</option>)}</select></div>
+          </div>
+          <div style={styles.formGroup}><label style={styles.formLabel}>Note</label><textarea value={form.note} onChange={e => setForm({ ...form, note: e.target.value })} style={styles.textarea} rows={2} /></div>
+          <div style={styles.formActions}><button type="button" onClick={onCancel} style={styles.actionButton}>Cancel</button><button type="submit" style={styles.actionButtonPrimary}>Save</button></div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+const styles = {
+  container: { fontFamily: '"Helvetica Neue", Helvetica, Arial, sans-serif', fontSize: '14px', lineHeight: 1.5, color: '#000', backgroundColor: '#fff', minHeight: '100vh', letterSpacing: '-0.01em' },
+  header: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '24px 32px', borderBottom: '1px solid #000' },
+  headerLeft: { display: 'flex', alignItems: 'baseline', gap: '16px' },
+  logo: { fontSize: '24px', fontWeight: 700, margin: 0, letterSpacing: '-0.02em' },
+  tagline: { fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#666' },
+  syncIndicator: { fontSize: '11px', color: '#666', marginLeft: '16px' },
+  headerRight: { display: 'flex', alignItems: 'center', gap: '16px' },
+  userEmail: { fontSize: '12px', color: '#666' },
+  signOutButton: { padding: '6px 12px', fontSize: '11px', background: 'none', border: '1px solid #ddd', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit' },
+  masterTabs: { display: 'flex', borderBottom: '1px solid #000' },
+  masterTab: { padding: '16px 32px', fontSize: '14px', fontWeight: 700, background: 'none', border: 'none', borderBottom: '3px solid transparent', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit', color: '#666' },
+  masterTabActive: { color: '#000', borderBottomColor: '#000', backgroundColor: '#f9f9f9' },
+  nav: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0 32px', borderBottom: '1px solid #ddd' },
+  navLinks: { display: 'flex' },
+  navLink: { background: 'none', border: 'none', borderBottom: '2px solid transparent', padding: '16px 24px', fontSize: '13px', fontWeight: 500, cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', color: '#666', fontFamily: 'inherit' },
+  navLinkActive: { color: '#000', borderBottomColor: '#000' },
+  navLabel: { padding: '16px 24px', fontSize: '13px', fontWeight: 500, textTransform: 'uppercase', letterSpacing: '0.05em', color: '#000' },
+  navActions: { display: 'flex', gap: '12px', alignItems: 'center' },
+  actionButton: { padding: '8px 16px', fontSize: '12px', background: 'none', border: '1px solid #000', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit' },
+  actionButtonPrimary: { padding: '8px 16px', fontSize: '12px', background: '#000', color: '#fff', border: '1px solid #000', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit' },
+  statsBar: { display: 'flex', alignItems: 'center', padding: '20px 32px', borderBottom: '1px solid #ddd', gap: '32px' },
+  stat: { display: 'flex', flexDirection: 'column', gap: '4px' },
+  statLabel: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#666' },
+  statValue: { fontSize: '24px', fontWeight: 700, letterSpacing: '-0.02em' },
+  statDivider: { width: '1px', height: '40px', backgroundColor: '#ddd' },
+  main: { padding: '32px' },
+  pipelineGrid: { display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '1px', backgroundColor: '#000' },
+  pipelineColumn: { backgroundColor: '#fff', padding: '16px', minHeight: '400px' },
+  pipelineHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' },
+  stageName: { fontSize: '12px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em' },
+  stageCount: { fontSize: '11px', color: '#666' },
+  stageValue: { fontSize: '16px', fontWeight: 500, marginBottom: '16px', paddingBottom: '16px', borderBottom: '1px solid #eee' },
+  pipelineCards: { display: 'flex', flexDirection: 'column', gap: '8px' },
+  prospectCard: { padding: '12px', border: '1px solid #ddd', cursor: 'pointer', transition: 'border-color 0.15s' },
+  prospectCardStale: { borderColor: '#000', borderWidth: '2px' },
+  cardCompany: { fontWeight: 700, marginBottom: '2px' },
+  cardContact: { fontSize: '12px', color: '#666', marginBottom: '2px' },
+  cardTitle: { fontSize: '11px', color: '#999', marginBottom: '8px' },
+  cardMeta: { display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#666' },
+  cardProbability: { fontSize: '10px', color: '#999', marginTop: '4px' },
+  cardEngagement: { fontSize: '10px', color: '#999', marginTop: '4px', textTransform: 'uppercase', letterSpacing: '0.05em' },
+  listView: { overflowX: 'auto' },
+  table: { width: '100%', borderCollapse: 'collapse' },
+  th: { textAlign: 'left', padding: '12px 16px', borderBottom: '2px solid #000', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.1em', fontWeight: 700 },
+  tr: { cursor: 'pointer', transition: 'background 0.15s' },
+  td: { padding: '12px 16px', borderBottom: '1px solid #eee' },
+  tdSecondary: { padding: '12px 16px', borderBottom: '1px solid #eee', color: '#666', fontSize: '13px' },
+  tableLinkIcon: { marginLeft: '6px', color: '#000', textDecoration: 'none', fontSize: '11px' },
+  projectionsView: { maxWidth: '1200px' },
+  projectionHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '24px' },
+  projectionTitle: { fontSize: '18px', fontWeight: 700, margin: 0 },
+  projectionToggle: { display: 'flex', border: '1px solid #000' },
+  toggleButton: { padding: '8px 16px', fontSize: '12px', background: 'none', border: 'none', cursor: 'pointer', textTransform: 'uppercase', letterSpacing: '0.05em', fontFamily: 'inherit' },
+  toggleButtonActive: { backgroundColor: '#000', color: '#fff' },
+  chartLegend: { display: 'flex', gap: '24px', marginBottom: '16px' },
+  legendItem: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' },
+  legendColor: { width: '16px', height: '16px' },
+  chartContainer: { display: 'flex', gap: '16px', marginBottom: '32px' },
+  chartYAxis: { display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: '11px', color: '#666', textAlign: 'right', paddingBottom: '24px', minWidth: '80px' },
+  chart: { flex: 1, display: 'flex', gap: '8px', alignItems: 'flex-end', height: '300px', borderBottom: '1px solid #000', borderLeft: '1px solid #000', paddingLeft: '8px', position: 'relative' },
+  chartBar: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%', position: 'relative' },
+  chartBarStack: { flex: 1, width: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' },
+  chartBarSegment: { width: '100%', transition: 'height 0.3s' },
+  chartBarLabel: { fontSize: '10px', marginTop: '8px', color: '#666' },
+  chartBarValue: { fontSize: '9px', color: '#999', marginTop: '2px' },
+  targetLine: { position: 'absolute', left: 0, right: 0, height: '2px', backgroundColor: '#c00', zIndex: 10 },
+  availableStaffLine: { position: 'absolute', left: 0, right: 0, height: '2px', backgroundColor: '#060', zIndex: 10 },
+  projectionSummary: { display: 'flex', gap: '32px', padding: '24px', border: '1px solid #000' },
+  projectionSummaryItem: { display: 'flex', flexDirection: 'column', gap: '4px' },
+  projectionSummaryLabel: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.1em', color: '#666' },
+  projectionSummaryValue: { fontSize: '20px', fontWeight: 700 },
+  insightsGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '24px' },
+  insightCard: { border: '1px solid #000', padding: '24px' },
+  insightTitle: { fontSize: '14px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginTop: 0, marginBottom: '16px' },
+  insightSubtitle: { fontSize: '12px', color: '#666', marginBottom: '16px' },
+  barChart: { display: 'flex', flexDirection: 'column', gap: '12px' },
+  barRow: { display: 'grid', gridTemplateColumns: '80px 1fr 80px', alignItems: 'center', gap: '12px' },
+  barLabel: { fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em' },
+  barTrack: { height: '8px', backgroundColor: '#eee' },
+  barFill: { height: '100%', backgroundColor: '#000', transition: 'width 0.3s' },
   barValue: { fontSize: '12px', textAlign: 'right' },
   attentionList: { display: 'flex', flexDirection: 'column', gap: '8px' },
   attentionItem: { display: 'flex', justifyContent: 'space-between', padding: '8px 0', borderBottom: '1px solid #eee', cursor: 'pointer' },
