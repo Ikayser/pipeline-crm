@@ -359,7 +359,7 @@ export default function CRMDashboard() {
         <>
           <nav style={styles.nav}>
             <div style={styles.navLinks}>
-              {['pipeline', 'list', 'projections', 'insights'].map(v => (
+              {['pipeline', 'list', 'monthly', 'projections', 'insights'].map(v => (
                 <button key={v} onClick={() => setView(v)} style={{...styles.navLink, ...(view === v ? styles.navLinkActive : {})}}>{v.charAt(0).toUpperCase() + v.slice(1)}</button>
               ))}
             </div>
@@ -436,6 +436,21 @@ export default function CRMDashboard() {
               </div>
             )}
 
+            {view === 'monthly' && (
+              <MonthlyEditableTable 
+                items={prospects.filter(p => p.stage !== 'Closed')} 
+                type="prospect"
+                months={MONTHS}
+                formatCurrency={formatCurrency}
+                onUpdate={async (id, monthlyRevenue, newTotal) => {
+                  setSyncing(true);
+                  await supabase.from('prospects').update({ monthly_revenue: monthlyRevenue, budget: newTotal }).eq('id', id);
+                  await loadProspects();
+                  setSyncing(false);
+                }}
+              />
+            )}
+
             {view === 'projections' && (
               <div style={styles.projectionsView}>
                 <div style={styles.projectionHeader}>
@@ -503,7 +518,7 @@ export default function CRMDashboard() {
         <>
           <nav style={styles.nav}>
             <div style={styles.navLinks}>
-              {['list', 'projections'].map(v => (
+              {['list', 'monthly', 'projections'].map(v => (
                 <button key={v} onClick={() => setProjectView(v)} style={{...styles.navLink, ...(projectView === v ? styles.navLinkActive : {})}}>{v.charAt(0).toUpperCase() + v.slice(1)}</button>
               ))}
             </div>
@@ -550,6 +565,21 @@ export default function CRMDashboard() {
                   </tbody>
                 </table>
               </div>
+            )}
+
+            {projectView === 'monthly' && (
+              <MonthlyEditableTable 
+                items={projects.filter(p => p.status === 'Active')} 
+                type="project"
+                months={MONTHS}
+                formatCurrency={formatCurrency}
+                onUpdate={async (id, monthlyRevenue, newTotal) => {
+                  setSyncing(true);
+                  await supabase.from('projects').update({ monthly_revenue: monthlyRevenue, contract_value: newTotal }).eq('id', id);
+                  await loadProjects();
+                  setSyncing(false);
+                }}
+              />
             )}
 
             {projectView === 'projections' && (
@@ -834,6 +864,180 @@ export default function CRMDashboard() {
       {showForm && <ProspectForm prospect={editingProspect} onSave={handleSaveProspect} onCancel={() => { setShowForm(false); setEditingProspect(null); }} />}
       {showProjectForm && <ProjectForm project={editingProject} onSave={handleSaveProject} onCancel={() => { setShowProjectForm(false); setEditingProject(null); }} />}
       {showEngagementForm && selectedProspect && <EngagementForm onSave={(eng) => handleAddEngagement(selectedProspect.id, eng)} onCancel={() => setShowEngagementForm(false)} />}
+    </div>
+  );
+}
+
+// Helper function to calculate auto-distributed monthly revenue
+function calculateAutoMonthlyRevenue(item, months, type) {
+  const result = {};
+  const startDate = item.start_date ? new Date(item.start_date) : null;
+  const durationWeeks = item.duration || 1;
+  const totalValue = type === 'project' ? (item.contract_value || 0) : (item.budget || 0);
+  
+  if (!startDate || !totalValue) return result;
+  
+  const weeklyRevenue = totalValue / durationWeeks;
+  
+  for (let week = 0; week < durationWeeks; week++) {
+    const revenueDate = new Date(startDate);
+    revenueDate.setDate(revenueDate.getDate() + (week * 7));
+    const monthKey = `${revenueDate.getFullYear()}-${String(revenueDate.getMonth() + 1).padStart(2, '0')}`;
+    
+    if (months.some(m => m.key === monthKey)) {
+      result[monthKey] = (result[monthKey] || 0) + weeklyRevenue;
+    }
+  }
+  
+  return result;
+}
+
+function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate }) {
+  const [editingCell, setEditingCell] = useState(null);
+  const [editValue, setEditValue] = useState('');
+
+  const getMonthlyValue = (item, monthKey) => {
+    // If there's an override, use it
+    if (item.monthly_revenue && item.monthly_revenue[monthKey] !== undefined) {
+      return item.monthly_revenue[monthKey];
+    }
+    // Otherwise calculate auto value
+    const autoValues = calculateAutoMonthlyRevenue(item, months, type);
+    return autoValues[monthKey] || 0;
+  };
+
+  const getTotalFromMonthly = (item) => {
+    let total = 0;
+    months.forEach(m => {
+      total += getMonthlyValue(item, m.key);
+    });
+    return total;
+  };
+
+  const handleCellClick = (itemId, monthKey, currentValue) => {
+    setEditingCell({ itemId, monthKey });
+    setEditValue(Math.round(currentValue).toString());
+  };
+
+  const handleCellBlur = async (item) => {
+    if (!editingCell) return;
+    
+    const newValue = parseFloat(editValue) || 0;
+    const currentMonthlyRevenue = item.monthly_revenue || {};
+    
+    // Create new monthly revenue object with the override
+    const newMonthlyRevenue = { ...currentMonthlyRevenue };
+    
+    // Get all current values (auto + overrides)
+    months.forEach(m => {
+      if (newMonthlyRevenue[m.key] === undefined) {
+        const autoValues = calculateAutoMonthlyRevenue(item, months, type);
+        if (autoValues[m.key]) {
+          newMonthlyRevenue[m.key] = autoValues[m.key];
+        }
+      }
+    });
+    
+    // Apply the new value
+    newMonthlyRevenue[editingCell.monthKey] = newValue;
+    
+    // Calculate new total
+    const newTotal = Object.values(newMonthlyRevenue).reduce((sum, val) => sum + (val || 0), 0);
+    
+    await onUpdate(item.id, newMonthlyRevenue, Math.round(newTotal));
+    setEditingCell(null);
+    setEditValue('');
+  };
+
+  const handleKeyDown = (e, item) => {
+    if (e.key === 'Enter') {
+      handleCellBlur(item);
+    } else if (e.key === 'Escape') {
+      setEditingCell(null);
+      setEditValue('');
+    }
+  };
+
+  const isOverridden = (item, monthKey) => {
+    return item.monthly_revenue && item.monthly_revenue[monthKey] !== undefined;
+  };
+
+  // Calculate column totals
+  const columnTotals = {};
+  months.forEach(m => {
+    columnTotals[m.key] = items.reduce((sum, item) => sum + getMonthlyValue(item, m.key), 0);
+  });
+  const grandTotal = Object.values(columnTotals).reduce((sum, val) => sum + val, 0);
+
+  return (
+    <div style={styles.monthlyTableContainer}>
+      <div style={styles.monthlyTableWrapper}>
+        <table style={styles.monthlyTable}>
+          <thead>
+            <tr>
+              <th style={styles.monthlyThFixed}>{type === 'project' ? 'Project' : 'Prospect'}</th>
+              <th style={styles.monthlyTh}>Total</th>
+              {months.map(m => (
+                <th key={m.key} style={styles.monthlyTh}>{m.label.split(' ')[0]}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {items.map(item => {
+              const itemName = item.project_name || item.company;
+              const itemTotal = getTotalFromMonthly(item);
+              
+              return (
+                <tr key={item.id}>
+                  <td style={styles.monthlyTdFixed}>{itemName}</td>
+                  <td style={styles.monthlyTdTotal}>{formatCurrency(itemTotal)}</td>
+                  {months.map(m => {
+                    const value = getMonthlyValue(item, m.key);
+                    const isEditing = editingCell?.itemId === item.id && editingCell?.monthKey === m.key;
+                    const hasOverride = isOverridden(item, m.key);
+                    
+                    return (
+                      <td 
+                        key={m.key} 
+                        style={{
+                          ...styles.monthlyTd,
+                          ...(hasOverride ? styles.monthlyTdOverride : {}),
+                          ...(value === 0 ? styles.monthlyTdZero : {})
+                        }}
+                        onClick={() => handleCellClick(item.id, m.key, value)}
+                      >
+                        {isEditing ? (
+                          <input
+                            type="number"
+                            value={editValue}
+                            onChange={e => setEditValue(e.target.value)}
+                            onBlur={() => handleCellBlur(item)}
+                            onKeyDown={e => handleKeyDown(e, item)}
+                            style={styles.monthlyInput}
+                            autoFocus
+                          />
+                        ) : (
+                          value > 0 ? formatCurrency(value) : '—'
+                        )}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+          </tbody>
+          <tfoot>
+            <tr style={styles.monthlyTotalRow}>
+              <td style={styles.monthlyTdFixed}>Total</td>
+              <td style={styles.monthlyTdTotal}>{formatCurrency(grandTotal)}</td>
+              {months.map(m => (
+                <td key={m.key} style={styles.monthlyTdTotal}>{formatCurrency(columnTotals[m.key])}</td>
+              ))}
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p style={styles.monthlyHint}>Click any cell to edit. Overridden values shown in bold. Press Enter to save, Escape to cancel.</p>
     </div>
   );
 }
@@ -1290,5 +1494,19 @@ const styles = {
   authError: { fontSize: '13px', color: '#c00', margin: 0 },
   authMessage: { fontSize: '13px', color: '#060', margin: 0 },
   authToggle: { marginTop: '24px', background: 'none', border: 'none', fontSize: '12px', color: '#666', cursor: 'pointer', textDecoration: 'underline', fontFamily: 'inherit' },
-  authText: { fontSize: '13px', color: '#666' }
+  authText: { fontSize: '13px', color: '#666' },
+  // Monthly editable table styles
+  monthlyTableContainer: { width: '100%' },
+  monthlyTableWrapper: { overflowX: 'auto', border: '1px solid #000' },
+  monthlyTable: { width: '100%', borderCollapse: 'collapse', minWidth: '1200px' },
+  monthlyTh: { padding: '12px 8px', borderBottom: '2px solid #000', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700, textAlign: 'right', whiteSpace: 'nowrap', backgroundColor: '#f9f9f9' },
+  monthlyThFixed: { padding: '12px 16px', borderBottom: '2px solid #000', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700, textAlign: 'left', position: 'sticky', left: 0, backgroundColor: '#f9f9f9', minWidth: '180px' },
+  monthlyTd: { padding: '10px 8px', borderBottom: '1px solid #eee', fontSize: '13px', textAlign: 'right', cursor: 'pointer', transition: 'background 0.15s' },
+  monthlyTdFixed: { padding: '10px 16px', borderBottom: '1px solid #eee', fontSize: '13px', fontWeight: 500, position: 'sticky', left: 0, backgroundColor: '#fff', minWidth: '180px' },
+  monthlyTdTotal: { padding: '10px 8px', borderBottom: '1px solid #eee', fontSize: '13px', fontWeight: 700, textAlign: 'right', backgroundColor: '#f9f9f9' },
+  monthlyTdOverride: { fontWeight: 700, backgroundColor: '#fffde7' },
+  monthlyTdZero: { color: '#ccc' },
+  monthlyTotalRow: { backgroundColor: '#f0f0f0' },
+  monthlyInput: { width: '80px', padding: '4px 8px', fontSize: '13px', border: '2px solid #000', textAlign: 'right', fontFamily: 'inherit', outline: 'none' },
+  monthlyHint: { fontSize: '11px', color: '#666', marginTop: '12px', fontStyle: 'italic' }
 };
