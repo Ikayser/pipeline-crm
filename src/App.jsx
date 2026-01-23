@@ -975,7 +975,8 @@ function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate })
         <table style={styles.monthlyTable}>
           <thead>
             <tr>
-              <th style={styles.monthlyThFixed}>{type === 'project' ? 'Project' : 'Prospect'}</th>
+              <th style={styles.monthlyThFixed}>Client</th>
+              <th style={styles.monthlyThProject}>Project</th>
               <th style={styles.monthlyTh}>Total</th>
               {months.map(m => (
                 <th key={m.key} style={styles.monthlyTh}>{m.label.split(' ')[0]}</th>
@@ -984,12 +985,12 @@ function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate })
           </thead>
           <tbody>
             {items.map(item => {
-              const itemName = item.project_name || item.company;
               const itemTotal = getTotalFromMonthly(item);
               
               return (
                 <tr key={item.id}>
-                  <td style={styles.monthlyTdFixed}>{itemName}</td>
+                  <td style={styles.monthlyTdFixed}>{item.company}</td>
+                  <td style={styles.monthlyTdProject}>{item.project_name || '—'}</td>
                   <td style={styles.monthlyTdTotal}>{formatCurrency(itemTotal)}</td>
                   {months.map(m => {
                     const value = getMonthlyValue(item, m.key);
@@ -1029,6 +1030,7 @@ function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate })
           <tfoot>
             <tr style={styles.monthlyTotalRow}>
               <td style={styles.monthlyTdFixed}>Total</td>
+              <td style={styles.monthlyTdProject}></td>
               <td style={styles.monthlyTdTotal}>{formatCurrency(grandTotal)}</td>
               {months.map(m => (
                 <td key={m.key} style={styles.monthlyTdTotal}>{formatCurrency(columnTotals[m.key])}</td>
@@ -1498,11 +1500,13 @@ const styles = {
   // Monthly editable table styles
   monthlyTableContainer: { width: '100%' },
   monthlyTableWrapper: { overflowX: 'auto', border: '1px solid #000' },
-  monthlyTable: { width: '100%', borderCollapse: 'collapse', minWidth: '1200px' },
+  monthlyTable: { width: '100%', borderCollapse: 'collapse', minWidth: '1400px' },
   monthlyTh: { padding: '12px 8px', borderBottom: '2px solid #000', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700, textAlign: 'right', whiteSpace: 'nowrap', backgroundColor: '#f9f9f9' },
-  monthlyThFixed: { padding: '12px 16px', borderBottom: '2px solid #000', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700, textAlign: 'left', position: 'sticky', left: 0, backgroundColor: '#f9f9f9', minWidth: '180px' },
+  monthlyThFixed: { padding: '12px 16px', borderBottom: '2px solid #000', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700, textAlign: 'left', position: 'sticky', left: 0, backgroundColor: '#f9f9f9', minWidth: '140px', zIndex: 2 },
+  monthlyThProject: { padding: '12px 16px', borderBottom: '2px solid #000', fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 700, textAlign: 'left', backgroundColor: '#f9f9f9', minWidth: '180px' },
   monthlyTd: { padding: '10px 8px', borderBottom: '1px solid #eee', fontSize: '13px', textAlign: 'right', cursor: 'pointer', transition: 'background 0.15s' },
-  monthlyTdFixed: { padding: '10px 16px', borderBottom: '1px solid #eee', fontSize: '13px', fontWeight: 500, position: 'sticky', left: 0, backgroundColor: '#fff', minWidth: '180px' },
+  monthlyTdFixed: { padding: '10px 16px', borderBottom: '1px solid #eee', fontSize: '13px', fontWeight: 500, position: 'sticky', left: 0, backgroundColor: '#fff', minWidth: '140px', zIndex: 1 },
+  monthlyTdProject: { padding: '10px 16px', borderBottom: '1px solid #eee', fontSize: '13px', color: '#666', minWidth: '180px' },
   monthlyTdTotal: { padding: '10px 8px', borderBottom: '1px solid #eee', fontSize: '13px', fontWeight: 700, textAlign: 'right', backgroundColor: '#f9f9f9' },
   monthlyTdOverride: { fontWeight: 700, backgroundColor: '#fffde7' },
   monthlyTdZero: { color: '#ccc' },
