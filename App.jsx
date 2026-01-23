@@ -10,6 +10,9 @@ const STAGES = ['Lead', 'Contacted', 'Meeting', 'Proposal', 'Negotiation', 'Clos
 const PROJECT_STATUSES = ['Active', 'Completed', 'On Hold'];
 const WORK_TYPES = ['Strategy', 'Design'];
 const BILLABLE_RATE = 290; // $ per hour average
+const HOURS_PER_WEEK = 36; // Adjusted for PTO, etc.
+const FREELANCE_DAY_RATE = 1000; // $ per day for freelancers
+const WORKING_DAYS_PER_MONTH = 20;
 
 // Generate next 12 months starting from current month
 const getNext12Months = () => {
@@ -28,11 +31,17 @@ const getNext12Months = () => {
 
 const MONTHS = getNext12Months();
 
-// Calculate FTEs needed: weekly revenue / billable rate / 40 hours
+// Calculate FTEs needed: weekly revenue / billable rate / 36 hours (adjusted for PTO)
 const calculateFTE = (contractValue, durationWeeks) => {
   if (!contractValue || !durationWeeks) return 0;
   const weeklyRevenue = contractValue / durationWeeks;
-  return weeklyRevenue / BILLABLE_RATE / 40;
+  return weeklyRevenue / BILLABLE_RATE / HOURS_PER_WEEK;
+};
+
+// Calculate freelance FTEs from monthly budget: budget / day rate / working days
+const calculateFreelanceFTE = (monthlyBudget) => {
+  if (!monthlyBudget) return 0;
+  return monthlyBudget / FREELANCE_DAY_RATE / WORKING_DAYS_PER_MONTH;
 };
 
 export default function CRMDashboard() {
@@ -41,7 +50,7 @@ export default function CRMDashboard() {
   const [masterTab, setMasterTab] = useState('pipeline');
   const [prospects, setProspects] = useState([]);
   const [projects, setProjects] = useState([]);
-  const [settings, setSettings] = useState({ monthlyTargets: {}, currentStaff: 0, plannedHires: {} });
+  const [settings, setSettings] = useState({ monthlyTargets: {}, currentStaff: 0, plannedHires: {}, freelanceBudget: {} });
   const [view, setView] = useState('pipeline');
   const [projectView, setProjectView] = useState('list');
   const [selectedProspect, setSelectedProspect] = useState(null);
@@ -97,11 +106,12 @@ export default function CRMDashboard() {
   const loadSettings = async () => {
     const { data, error } = await supabase.from('settings').select('*');
     if (error) { console.error('Error loading settings:', error); return; }
-    const settingsObj = { monthlyTargets: {}, currentStaff: 0, plannedHires: {} };
+    const settingsObj = { monthlyTargets: {}, currentStaff: 0, plannedHires: {}, freelanceBudget: {} };
     data?.forEach(row => {
       if (row.setting_key === 'monthlyTargets') settingsObj.monthlyTargets = row.setting_value || {};
       if (row.setting_key === 'currentStaff') settingsObj.currentStaff = row.setting_value?.value || 0;
       if (row.setting_key === 'plannedHires') settingsObj.plannedHires = row.setting_value || {};
+      if (row.setting_key === 'freelanceBudget') settingsObj.freelanceBudget = row.setting_value || {};
     });
     setSettings(settingsObj);
   };
@@ -240,7 +250,9 @@ export default function CRMDashboard() {
       committedRevenue: 0, pipelineRevenue: 0, pipelineRevenueWeighted: 0,
       committedFTE: 0, pipelineFTE: 0, pipelineFTEWeighted: 0,
       target: settings.monthlyTargets[m.key] || 0,
-      hires: settings.plannedHires[m.key] || 0
+      hires: settings.plannedHires[m.key] || 0,
+      freelanceBudget: settings.freelanceBudget[m.key] || 0,
+      freelanceFTE: calculateFreelanceFTE(settings.freelanceBudget[m.key] || 0)
     }));
 
     // Add committed revenue and FTEs from projects
@@ -286,11 +298,12 @@ export default function CRMDashboard() {
       }
     });
 
-    // Calculate cumulative available staff
+    // Calculate cumulative available staff (full-time + freelance)
     let cumulativeHires = 0;
     months.forEach(m => {
       cumulativeHires += m.hires;
-      m.availableStaff = settings.currentStaff + cumulativeHires;
+      m.fullTimeStaff = settings.currentStaff + cumulativeHires;
+      m.availableStaff = m.fullTimeStaff + m.freelanceFTE;
     });
 
     return months;
@@ -643,7 +656,7 @@ export default function CRMDashboard() {
               <div style={styles.chartLegend}>
                 <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#000'}} /><span>Committed FTEs</span></div>
                 <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#999'}} /><span>Pipeline FTEs</span></div>
-                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: 'transparent', border: '2px solid #060'}} /><span>Available Staff</span></div>
+                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: 'transparent', border: '2px solid #060'}} /><span>Staff + Freelance</span></div>
               </div>
               <div style={styles.chartContainer}>
                 <div style={styles.chartYAxis}><span>{maxFTE.toFixed(1)}</span><span>{(maxFTE / 2).toFixed(1)}</span><span>0</span></div>
@@ -667,7 +680,7 @@ export default function CRMDashboard() {
               <div style={styles.projectionSummary}>
                 <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Current Staff</span><span style={styles.projectionSummaryValue}>{settings.currentStaff}</span></div>
                 <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Planned Hires (12mo)</span><span style={styles.projectionSummaryValue}>{MONTHS.reduce((sum, m) => sum + (settings.plannedHires[m.key] || 0), 0)}</span></div>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>End of Year Staff</span><span style={styles.projectionSummaryValue}>{projectionData[11]?.availableStaff || settings.currentStaff}</span></div>
+                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Avg Freelance FTEs</span><span style={styles.projectionSummaryValue}>{(MONTHS.reduce((sum, m) => sum + calculateFreelanceFTE(settings.freelanceBudget[m.key] || 0), 0) / 12).toFixed(1)}</span></div>
               </div>
             </div>
 
@@ -684,7 +697,8 @@ export default function CRMDashboard() {
                     <th style={styles.th}>Total</th>
                     <th style={styles.th}>Gap</th>
                     <th style={styles.th}>FTEs Needed</th>
-                    <th style={styles.th}>Staff Available</th>
+                    <th style={styles.th}>Staff</th>
+                    <th style={styles.th}>Freelance</th>
                     <th style={styles.th}>Staffing Gap</th>
                   </tr></thead>
                   <tbody>
@@ -694,7 +708,7 @@ export default function CRMDashboard() {
                       const total = month.committedRevenue + pipeline;
                       const revenueGap = total - month.target;
                       const neededFTE = month.committedFTE + pipelineFTE;
-                      const staffingGap = month.availableStaff - neededFTE;
+                      const staffingGap = neededFTE - month.availableStaff;
                       return (
                         <tr key={idx} style={styles.tr}>
                           <td style={styles.td}>{month.label}</td>
@@ -704,8 +718,9 @@ export default function CRMDashboard() {
                           <td style={styles.td}>{formatCurrency(total)}</td>
                           <td style={{...styles.td, color: revenueGap >= 0 ? '#060' : '#c00', fontWeight: 600}}>{formatCurrency(revenueGap)}</td>
                           <td style={styles.td}>{neededFTE.toFixed(1)}</td>
-                          <td style={styles.td}>{month.availableStaff}</td>
-                          <td style={{...styles.td, color: staffingGap >= 0 ? '#060' : '#c00', fontWeight: 600}}>{staffingGap >= 0 ? '+' : ''}{staffingGap.toFixed(1)}</td>
+                          <td style={styles.td}>{month.fullTimeStaff.toFixed(1)}</td>
+                          <td style={styles.td}>{month.freelanceFTE.toFixed(1)}</td>
+                          <td style={{...styles.td, color: staffingGap > 0 ? '#c00' : '#060', fontWeight: 600}}>{staffingGap > 0 ? '+' : ''}{staffingGap.toFixed(1)}</td>
                         </tr>
                       );
                     })}
@@ -827,12 +842,14 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
   const [monthlyTargets, setMonthlyTargets] = useState(settings.monthlyTargets || {});
   const [currentStaff, setCurrentStaff] = useState(settings.currentStaff || 0);
   const [plannedHires, setPlannedHires] = useState(settings.plannedHires || {});
+  const [freelanceBudget, setFreelanceBudget] = useState(settings.freelanceBudget || {});
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setMonthlyTargets(settings.monthlyTargets || {});
     setCurrentStaff(settings.currentStaff || 0);
     setPlannedHires(settings.plannedHires || {});
+    setFreelanceBudget(settings.freelanceBudget || {});
   }, [settings]);
 
   const handleSaveAll = async () => {
@@ -840,11 +857,13 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
     await onSave('monthlyTargets', monthlyTargets);
     await onSave('currentStaff', { value: currentStaff });
     await onSave('plannedHires', plannedHires);
+    await onSave('freelanceBudget', freelanceBudget);
     setSaving(false);
   };
 
   const annualTarget = MONTHS.reduce((sum, m) => sum + (monthlyTargets[m.key] || 0), 0);
   const totalHires = MONTHS.reduce((sum, m) => sum + (plannedHires[m.key] || 0), 0);
+  const totalFreelanceBudget = MONTHS.reduce((sum, m) => sum + (freelanceBudget[m.key] || 0), 0);
 
   return (
     <main style={styles.main}>
@@ -902,6 +921,27 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
                   type="number"
                   value={plannedHires[month.key] || ''}
                   onChange={e => setPlannedHires({ ...plannedHires, [month.key]: Number(e.target.value) || 0 })}
+                  style={styles.input}
+                  placeholder="0"
+                  min="0"
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Freelance Budget */}
+        <div style={styles.settingsSection}>
+          <h3 style={styles.insightTitle}>Monthly Freelance Budget</h3>
+          <p style={styles.settingsSubtitle}>Total Annual Budget: {formatCurrency(totalFreelanceBudget)} (at $1,000/day = {(totalFreelanceBudget / FREELANCE_DAY_RATE / WORKING_DAYS_PER_MONTH).toFixed(1)} avg FTEs/month)</p>
+          <div style={styles.monthGrid}>
+            {MONTHS.map(month => (
+              <div key={month.key} style={styles.monthInputGroup}>
+                <label style={styles.formLabel}>{month.label}</label>
+                <input
+                  type="number"
+                  value={freelanceBudget[month.key] || ''}
+                  onChange={e => setFreelanceBudget({ ...freelanceBudget, [month.key]: Number(e.target.value) || 0 })}
                   style={styles.input}
                   placeholder="0"
                   min="0"
