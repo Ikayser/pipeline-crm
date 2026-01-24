@@ -31,6 +31,13 @@ const getNext12Months = () => {
 
 const MONTHS = getNext12Months();
 
+// Parse date string as local date (not UTC) to avoid timezone shift
+const parseLocalDate = (dateStr) => {
+  if (!dateStr) return null;
+  const [year, month, day] = dateStr.split('T')[0].split('-').map(Number);
+  return new Date(year, month - 1, day);
+};
+
 // Calculate FTEs needed: weekly revenue / billable rate / 36 hours (adjusted for PTO)
 const calculateFTE = (contractValue, durationWeeks) => {
   if (!contractValue || !durationWeeks) return 0;
@@ -129,9 +136,25 @@ export default function CRMDashboard() {
   };
 
   const formatCurrency = (num) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(num || 0);
-  const formatDate = (dateStr) => !dateStr ? '—' : new Date(dateStr).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  const formatMonthYear = (dateStr) => !dateStr ? '—' : new Date(dateStr).toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-  const daysSince = (dateStr) => !dateStr ? 0 : Math.floor((new Date() - new Date(dateStr)) / (1000 * 60 * 60 * 24));
+  
+  const formatDate = (dateStr) => {
+    const date = parseLocalDate(dateStr);
+    return date ? date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
+  };
+  
+  const formatMonthYear = (dateStr) => {
+    const date = parseLocalDate(dateStr);
+    return date ? date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }) : '—';
+  };
+  
+  const daysSince = (dateStr) => {
+    const date = parseLocalDate(dateStr);
+    if (!date) return 0;
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    return Math.floor((today - date) / (1000 * 60 * 60 * 24));
+  };
+  
   const parseWorkTypes = (workTypeStr) => !workTypeStr ? [] : workTypeStr.split(',').map(t => t.trim()).filter(Boolean);
 
   const totalPipeline = prospects.reduce((sum, p) => sum + (p.budget || 0), 0);
@@ -258,7 +281,8 @@ export default function CRMDashboard() {
     // Add committed revenue and FTEs from projects
     projects.filter(p => p.status === 'Active').forEach(p => {
       if (!p.start_date || !p.contract_value) return;
-      const startDate = new Date(p.start_date);
+      const startDate = parseLocalDate(p.start_date);
+      if (!startDate) return;
       const durationWeeks = p.duration || 1;
       const weeklyRevenue = p.contract_value / durationWeeks;
       const weeklyFTE = p.staffing_fte != null ? p.staffing_fte / (durationWeeks / 4) : calculateFTE(p.contract_value, durationWeeks);
@@ -278,7 +302,8 @@ export default function CRMDashboard() {
     // Add pipeline revenue and FTEs from prospects
     prospects.filter(p => p.stage !== 'Closed').forEach(p => {
       if (!p.start_date || !p.budget) return;
-      const startDate = new Date(p.start_date);
+      const startDate = parseLocalDate(p.start_date);
+      if (!startDate) return;
       const durationWeeks = p.duration || 1;
       const probability = (p.probability || 50) / 100;
       const weeklyRevenue = p.budget / durationWeeks;
@@ -871,7 +896,7 @@ export default function CRMDashboard() {
 // Helper function to calculate auto-distributed monthly revenue
 function calculateAutoMonthlyRevenue(item, months, type) {
   const result = {};
-  const startDate = item.start_date ? new Date(item.start_date) : null;
+  const startDate = parseLocalDate(item.start_date);
   const durationWeeks = item.duration || 1;
   const totalValue = type === 'project' ? (item.contract_value || 0) : (item.budget || 0);
   
