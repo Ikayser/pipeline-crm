@@ -68,7 +68,7 @@ export default function CRMDashboard() {
   const [editingProject, setEditingProject] = useState(null);
   const [showEngagementForm, setShowEngagementForm] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [showWeighted, setShowWeighted] = useState(false);
+  const [showWeighted, setShowWeighted] = useState(true);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -375,7 +375,7 @@ export default function CRMDashboard() {
       <div style={styles.masterTabs}>
         <button onClick={() => setMasterTab('pipeline')} style={{...styles.masterTab, ...(masterTab === 'pipeline' ? styles.masterTabActive : {})}}>Pipeline</button>
         <button onClick={() => setMasterTab('projects')} style={{...styles.masterTab, ...(masterTab === 'projects' ? styles.masterTabActive : {})}}>Projects</button>
-        <button onClick={() => setMasterTab('master-insights')} style={{...styles.masterTab, ...(masterTab === 'master-insights' ? styles.masterTabActive : {})}}>Master Insights</button>
+        <button onClick={() => setMasterTab('ops-dashboard')} style={{...styles.masterTab, ...(masterTab === 'ops-dashboard' ? styles.masterTabActive : {})}}>Ops Dashboard</button>
         <button onClick={() => setMasterTab('settings')} style={{...styles.masterTab, ...(masterTab === 'settings' ? styles.masterTabActive : {})}}>Settings</button>
       </div>
 
@@ -641,11 +641,11 @@ export default function CRMDashboard() {
       )}
 
       {/* MASTER INSIGHTS TAB */}
-      {masterTab === 'master-insights' && (
+      {masterTab === 'ops-dashboard' && (
         <>
           <nav style={styles.nav}>
             <div style={styles.navLinks}>
-              <span style={styles.navLabel}>Combined Revenue & Staffing View</span>
+              <span style={styles.navLabel}>Ops Dashboard</span>
             </div>
             <div style={styles.navActions}>
               <div style={styles.projectionToggle}>
@@ -655,19 +655,153 @@ export default function CRMDashboard() {
             </div>
           </nav>
 
-          <div style={styles.statsBar}>
-            <div style={styles.stat}><span style={styles.statLabel}>Committed Revenue</span><span style={styles.statValue}>{formatCurrency(totalCommitted)}</span></div>
-            <div style={styles.statDivider} />
-            <div style={styles.stat}><span style={styles.statLabel}>{showWeighted ? 'Weighted' : 'Total'} Pipeline</span><span style={styles.statValue}>{formatCurrency(showWeighted ? weightedPipeline : totalPipeline)}</span></div>
-            <div style={styles.statDivider} />
-            <div style={styles.stat}><span style={styles.statLabel}>Annual Target</span><span style={styles.statValue}>{formatCurrency(annualTarget)}</span></div>
-            <div style={styles.statDivider} />
-            <div style={styles.stat}><span style={styles.statLabel}>Current Staff</span><span style={styles.statValue}>{settings.currentStaff}</span></div>
-          </div>
-
           <main style={styles.main}>
+            {/* Ops Meeting Agenda */}
+            {(() => {
+              const WEEKLY_RUN_RATE = 25000;
+              const currentMonth = projectionData[0];
+              const next3Months = projectionData.slice(0, 3);
+              
+              // Current month committed gap
+              const currentMonthCommittedGap = currentMonth.target - currentMonth.committedRevenue;
+              
+              // 90-day likely: committed + 90%+ probability prospects
+              const likely90Revenue = next3Months.reduce((sum, m) => {
+                const likelyPipeline = prospects
+                  .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
+                  .reduce((pSum, p) => {
+                    if (!p.start_date || !p.budget) return pSum;
+                    const startDate = parseLocalDate(p.start_date);
+                    if (!startDate) return pSum;
+                    const durationWeeks = p.duration || 1;
+                    const weeklyRevenue = p.budget / durationWeeks;
+                    let monthRevenue = 0;
+                    for (let week = 0; week < durationWeeks; week++) {
+                      const revenueDate = new Date(startDate);
+                      revenueDate.setDate(revenueDate.getDate() + (week * 7));
+                      const monthKey = `${revenueDate.getFullYear()}-${String(revenueDate.getMonth() + 1).padStart(2, '0')}`;
+                      if (monthKey === m.key) monthRevenue += weeklyRevenue;
+                    }
+                    return pSum + monthRevenue;
+                  }, 0);
+                return sum + m.committedRevenue + likelyPipeline;
+              }, 0);
+              const likely90Target = next3Months.reduce((sum, m) => sum + m.target, 0);
+              const likely90Gap = likely90Target - likely90Revenue;
+              
+              // Projects needed calculation
+              const projectsNeeded = likely90Gap > 0 ? Math.ceil(likely90Gap / (WEEKLY_RUN_RATE * 4)) : 0;
+              
+              // Staffing gaps for likely revenue
+              const staffingGaps = next3Months.map(m => {
+                const likelyPipelineFTE = prospects
+                  .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
+                  .reduce((pSum, p) => {
+                    if (!p.start_date || !p.budget) return pSum;
+                    const startDate = parseLocalDate(p.start_date);
+                    if (!startDate) return pSum;
+                    const durationWeeks = p.duration || 1;
+                    const weeklyFTE = p.staffing_fte != null ? p.staffing_fte / (durationWeeks / 4) : calculateFTE(p.budget, durationWeeks);
+                    let monthFTE = 0;
+                    for (let week = 0; week < durationWeeks; week++) {
+                      const revenueDate = new Date(startDate);
+                      revenueDate.setDate(revenueDate.getDate() + (week * 7));
+                      const monthKey = `${revenueDate.getFullYear()}-${String(revenueDate.getMonth() + 1).padStart(2, '0')}`;
+                      if (monthKey === m.key) monthFTE += weeklyFTE / 4;
+                    }
+                    return pSum + monthFTE;
+                  }, 0);
+                const neededFTE = m.committedFTE + likelyPipelineFTE;
+                return { month: m.label, gap: neededFTE - m.availableStaff };
+              });
+
+              return (
+                <div style={styles.agendaSection}>
+                  <h2 style={styles.agendaTitle}>Ops Meeting Agenda</h2>
+                  <div style={styles.agendaGrid}>
+                    <div style={styles.agendaCard}>
+                      <h3 style={styles.agendaCardTitle}>Current Situation</h3>
+                      <div style={styles.agendaItem}>
+                        <span style={styles.agendaLabel}>Current Month Gap (Committed vs Target)</span>
+                        <span style={{...styles.agendaValue, color: currentMonthCommittedGap <= 0 ? '#060' : '#c00'}}>
+                          {formatCurrency(currentMonthCommittedGap > 0 ? -currentMonthCommittedGap : Math.abs(currentMonthCommittedGap))}
+                        </span>
+                      </div>
+                      <div style={styles.agendaItem}>
+                        <span style={styles.agendaLabel}>90-Day Likely Gap (Committed + 90%+ Prospects)</span>
+                        <span style={{...styles.agendaValue, color: likely90Gap <= 0 ? '#060' : '#c00'}}>
+                          {formatCurrency(likely90Gap > 0 ? -likely90Gap : Math.abs(likely90Gap))}
+                        </span>
+                      </div>
+                    </div>
+                    <div style={styles.agendaCard}>
+                      <h3 style={styles.agendaCardTitle}>Gap Analysis</h3>
+                      <div style={styles.agendaItem}>
+                        <span style={styles.agendaLabel}>New Projects Needed (at $25K/wk)</span>
+                        <span style={{...styles.agendaValue, color: projectsNeeded > 0 ? '#c00' : '#060'}}>
+                          {projectsNeeded > 0 ? `${projectsNeeded} project${projectsNeeded > 1 ? 's' : ''}` : 'None'}
+                        </span>
+                      </div>
+                      <div style={styles.agendaItem}>
+                        <span style={styles.agendaLabel}>Staffing Gaps (Likely Revenue)</span>
+                        <div style={styles.staffingGapList}>
+                          {staffingGaps.map((sg, idx) => (
+                            <span key={idx} style={{...styles.staffingGapItem, color: sg.gap > 0 ? '#c00' : '#060'}}>
+                              {sg.month.split(' ')[0]}: {sg.gap > 0 ? '+' : ''}{sg.gap.toFixed(1)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* 3-Month Revenue Detail */}
+            <div style={styles.threeMonthSection}>
+              <h2 style={styles.projectionTitle}>Next 3 Months Detail</h2>
+              <div style={styles.threeMonthGrid}>
+                {projectionData.slice(0, 3).map((month, idx) => {
+                  const pipeline = showWeighted ? month.pipelineRevenueWeighted : month.pipelineRevenue;
+                  const committedGap = month.target - month.committedRevenue;
+                  const totalGap = month.target - (month.committedRevenue + pipeline);
+                  return (
+                    <div key={idx} style={styles.threeMonthCard}>
+                      <h3 style={styles.threeMonthTitle}>{month.label}</h3>
+                      <div style={styles.threeMonthRow}>
+                        <span style={styles.threeMonthLabel}>Target</span>
+                        <span style={styles.threeMonthValue}>{formatCurrency(month.target)}</span>
+                      </div>
+                      <div style={styles.threeMonthRow}>
+                        <span style={styles.threeMonthLabel}>Committed</span>
+                        <span style={styles.threeMonthValue}>{formatCurrency(month.committedRevenue)}</span>
+                      </div>
+                      <div style={styles.threeMonthRow}>
+                        <span style={styles.threeMonthLabel}>Gap (Target - Committed)</span>
+                        <span style={{...styles.threeMonthValue, color: committedGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>
+                          {formatCurrency(-committedGap)}
+                        </span>
+                      </div>
+                      <div style={styles.threeMonthDivider} />
+                      <div style={styles.threeMonthRow}>
+                        <span style={styles.threeMonthLabel}>Committed + {showWeighted ? 'Weighted' : 'Estimated'}</span>
+                        <span style={styles.threeMonthValue}>{formatCurrency(month.committedRevenue + pipeline)}</span>
+                      </div>
+                      <div style={styles.threeMonthRow}>
+                        <span style={styles.threeMonthLabel}>Gap (Target - Total)</span>
+                        <span style={{...styles.threeMonthValue, color: totalGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>
+                          {formatCurrency(-totalGap)}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* Revenue Chart */}
-            <div style={styles.projectionsView}>
+            <div style={{...styles.projectionsView, marginTop: '48px'}}>
               <div style={styles.projectionHeader}>
                 <h2 style={styles.projectionTitle}>Revenue vs Target</h2>
               </div>
@@ -1537,5 +1671,25 @@ const styles = {
   monthlyTdZero: { color: '#ccc' },
   monthlyTotalRow: { backgroundColor: '#f0f0f0' },
   monthlyInput: { width: '80px', padding: '4px 8px', fontSize: '13px', border: '2px solid #000', textAlign: 'right', fontFamily: 'inherit', outline: 'none' },
-  monthlyHint: { fontSize: '11px', color: '#666', marginTop: '12px', fontStyle: 'italic' }
+  monthlyHint: { fontSize: '11px', color: '#666', marginTop: '12px', fontStyle: 'italic' },
+  // Ops Dashboard Agenda styles
+  agendaSection: { marginBottom: '48px', padding: '24px', border: '2px solid #000', backgroundColor: '#f9f9f9' },
+  agendaTitle: { fontSize: '20px', fontWeight: 700, marginTop: 0, marginBottom: '24px', textTransform: 'uppercase', letterSpacing: '0.05em' },
+  agendaGrid: { display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '24px' },
+  agendaCard: { backgroundColor: '#fff', padding: '20px', border: '1px solid #ddd' },
+  agendaCardTitle: { fontSize: '14px', fontWeight: 700, marginTop: 0, marginBottom: '16px', textTransform: 'uppercase', letterSpacing: '0.05em' },
+  agendaItem: { marginBottom: '12px' },
+  agendaLabel: { fontSize: '12px', color: '#666', display: 'block', marginBottom: '4px' },
+  agendaValue: { fontSize: '20px', fontWeight: 700 },
+  staffingGapList: { display: 'flex', gap: '16px', marginTop: '4px' },
+  staffingGapItem: { fontSize: '14px', fontWeight: 600 },
+  // 3-month detail styles
+  threeMonthSection: { marginBottom: '48px' },
+  threeMonthGrid: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '24px' },
+  threeMonthCard: { padding: '20px', border: '1px solid #000' },
+  threeMonthTitle: { fontSize: '16px', fontWeight: 700, marginTop: 0, marginBottom: '16px', textTransform: 'uppercase', letterSpacing: '0.05em' },
+  threeMonthRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' },
+  threeMonthLabel: { fontSize: '12px', color: '#666' },
+  threeMonthValue: { fontSize: '14px', fontWeight: 500 },
+  threeMonthDivider: { height: '1px', backgroundColor: '#ddd', margin: '12px 0' }
 };
