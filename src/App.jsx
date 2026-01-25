@@ -525,8 +525,8 @@ export default function CRMDashboard() {
               <div style={styles.listView}>
                 <table style={styles.table}>
                   <thead><tr>
-                    <th style={styles.th}>Project</th><th style={styles.th}>Company</th><th style={styles.th}>Contact</th><th style={styles.th}>Type</th><th style={styles.th}>Budget</th>
-                    <th style={styles.th}>Prob.</th><th style={styles.th}>FTEs</th><th style={styles.th}>Start</th><th style={styles.th}>Duration</th><th style={styles.th}>Stage</th><th style={styles.th}>Last Contact</th>
+                    <th style={styles.th}>Company</th><th style={styles.th}>Project</th><th style={styles.th}>Type</th><th style={styles.th}>Budget</th>
+                    <th style={styles.th}>Duration</th><th style={styles.th}>Prob.</th><th style={styles.th}>Start</th><th style={styles.th}>FTEs</th><th style={styles.th}>Stage</th><th style={styles.th}>Last Contact</th>
                   </tr></thead>
                   <tbody>
                     {prospects.map(prospect => {
@@ -534,15 +534,14 @@ export default function CRMDashboard() {
                       const displayFTE = prospect.staffing_fte != null ? prospect.staffing_fte : autoFTE;
                       return (
                         <tr key={prospect.id} style={styles.tr} onClick={() => setSelectedProspect(prospect)}>
-                          <td style={styles.td}>{prospect.project_name || '—'}</td>
                           <td style={styles.td}>{prospect.company}</td>
-                          <td style={styles.td}>{prospect.contact}{prospect.linkedin && <a href={prospect.linkedin} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={styles.tableLinkIcon}>↗</a>}</td>
+                          <td style={styles.td}>{prospect.project_name || '—'}</td>
                           <td style={styles.tdSecondary}>{parseWorkTypes(prospect.work_type).join(', ') || '—'}</td>
                           <td style={styles.td}>{formatCurrency(prospect.budget)}</td>
-                          <td style={styles.td}>{prospect.probability || 50}%</td>
-                          <td style={styles.td}>{displayFTE.toFixed(1)}</td>
-                          <td style={styles.tdSecondary}>{formatDate(prospect.start_date)}</td>
                           <td style={styles.tdSecondary}>{prospect.duration || 1}wk</td>
+                          <td style={styles.td}>{prospect.probability || 50}%</td>
+                          <td style={styles.tdSecondary}>{formatDate(prospect.start_date)}</td>
+                          <td style={styles.td}>{displayFTE.toFixed(1)}</td>
                           <td style={styles.td}>{prospect.stage}</td>
                           <td style={{...styles.td, ...(daysSince(prospect.last_engagement) > 7 ? { fontWeight: 700 } : {})}}>{formatDate(prospect.last_engagement)} ({daysSince(prospect.last_engagement)}d)</td>
                         </tr>
@@ -658,8 +657,8 @@ export default function CRMDashboard() {
               <div style={styles.listView}>
                 <table style={styles.table}>
                   <thead><tr>
-                    <th style={styles.th}>Project</th><th style={styles.th}>Company</th><th style={styles.th}>Contact</th><th style={styles.th}>Type</th>
-                    <th style={styles.th}>Contract Value</th><th style={styles.th}>FTEs</th><th style={styles.th}>Start</th><th style={styles.th}>Duration</th><th style={styles.th}>Status</th>
+                    <th style={styles.th}>Company</th><th style={styles.th}>Project</th><th style={styles.th}>Type</th>
+                    <th style={styles.th}>Contract Value</th><th style={styles.th}>Duration</th><th style={styles.th}>Start</th><th style={styles.th}>FTEs</th><th style={styles.th}>Status</th>
                   </tr></thead>
                   <tbody>
                     {projects.map(project => {
@@ -667,14 +666,13 @@ export default function CRMDashboard() {
                       const displayFTE = project.staffing_fte != null ? project.staffing_fte : autoFTE;
                       return (
                         <tr key={project.id} style={styles.tr} onClick={() => setSelectedProject(project)}>
-                          <td style={styles.td}>{project.project_name || '—'}</td>
                           <td style={styles.td}>{project.company}</td>
-                          <td style={styles.td}>{project.contact || '—'}</td>
+                          <td style={styles.td}>{project.project_name || '—'}</td>
                           <td style={styles.tdSecondary}>{parseWorkTypes(project.work_type).join(', ') || '—'}</td>
                           <td style={styles.td}>{formatCurrency(project.contract_value)}</td>
-                          <td style={styles.td}>{displayFTE.toFixed(1)}</td>
-                          <td style={styles.tdSecondary}>{formatDate(project.start_date)}</td>
                           <td style={styles.tdSecondary}>{project.duration || 1}wk</td>
+                          <td style={styles.tdSecondary}>{formatDate(project.start_date)}</td>
+                          <td style={styles.td}>{displayFTE.toFixed(1)}</td>
                           <td style={{...styles.td, fontWeight: project.status === 'Active' ? 700 : 400}}>{project.status}</td>
                         </tr>
                       );
@@ -753,49 +751,67 @@ export default function CRMDashboard() {
               const WEEKLY_RUN_RATE = 25000;
               const currentMonth = projectionData[0];
               const next3Months = projectionData.slice(0, 3);
+              const following3Months = projectionData.slice(3, 6);
               
               // Current month committed gap
               const currentMonthCommittedGap = currentMonth.target - currentMonth.committedRevenue;
               
-              // 90-day likely: committed + 90%+ probability prospects (using business days)
-              const likely90Revenue = next3Months.reduce((sum, m) => {
-                const likelyPipeline = prospects
-                  .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
-                  .reduce((pSum, p) => {
-                    if (!p.start_date || !p.budget) return pSum;
-                    const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
-                    return pSum + (monthlyRevenue[m.key] || 0);
-                  }, 0);
-                return sum + m.committedRevenue + likelyPipeline;
-              }, 0);
-              const likely90Target = next3Months.reduce((sum, m) => sum + m.target, 0);
-              const likely90Gap = likely90Target - likely90Revenue;
+              // Helper function to calculate gap analysis for a 3-month period
+              const calculateGapAnalysis = (months, periodLabel) => {
+                const likelyRevenue = months.reduce((sum, m) => {
+                  const likelyPipeline = prospects
+                    .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
+                    .reduce((pSum, p) => {
+                      if (!p.start_date || !p.budget) return pSum;
+                      const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
+                      return pSum + (monthlyRevenue[m.key] || 0);
+                    }, 0);
+                  return sum + m.committedRevenue + likelyPipeline;
+                }, 0);
+                const target = months.reduce((sum, m) => sum + m.target, 0);
+                const gap = target - likelyRevenue;
+                const projectsNeeded = gap > 0 ? Math.ceil(gap / (WEEKLY_RUN_RATE * 4)) : 0;
+                
+                // Calculate required start date to fill gap
+                // Projects need to start early enough to generate revenue in the period
+                const periodStart = months[0]?.date;
+                const requiredStartDate = periodStart ? new Date(periodStart) : null;
+                
+                // Staffing gaps
+                const staffingGaps = months.map(m => {
+                  const likelyPipelineFTE = prospects
+                    .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
+                    .reduce((pSum, p) => {
+                      if (!p.start_date || !p.budget) return pSum;
+                      const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
+                      const totalRevenue = Object.values(monthlyRevenue).reduce((s, v) => s + v, 0) || 1;
+                      const totalFTE = p.staffing_fte != null ? p.staffing_fte : calculateFTE(p.budget, p.duration || 1) * (p.duration || 1) / 4;
+                      const monthRevenue = monthlyRevenue[m.key] || 0;
+                      return pSum + totalFTE * (monthRevenue / totalRevenue);
+                    }, 0);
+                  const neededFTE = m.committedFTE + likelyPipelineFTE;
+                  return { month: m.label, gap: neededFTE - m.availableStaff };
+                });
+                
+                return { likelyRevenue, target, gap, projectsNeeded, requiredStartDate, staffingGaps, periodLabel };
+              };
               
-              // Projects needed calculation
-              const projectsNeeded = likely90Gap > 0 ? Math.ceil(likely90Gap / (WEEKLY_RUN_RATE * 4)) : 0;
+              const first90 = calculateGapAnalysis(next3Months, 'Current 90 Days');
+              const second90 = calculateGapAnalysis(following3Months, 'Following 90 Days');
               
-              // Staffing gaps for likely revenue (using business days)
-              const staffingGaps = next3Months.map(m => {
-                const likelyPipelineFTE = prospects
-                  .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
-                  .reduce((pSum, p) => {
-                    if (!p.start_date || !p.budget) return pSum;
-                    const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
-                    const totalRevenue = Object.values(monthlyRevenue).reduce((s, v) => s + v, 0) || 1;
-                    const totalFTE = p.staffing_fte != null ? p.staffing_fte : calculateFTE(p.budget, p.duration || 1) * (p.duration || 1) / 4;
-                    const monthRevenue = monthlyRevenue[m.key] || 0;
-                    return pSum + totalFTE * (monthRevenue / totalRevenue);
-                  }, 0);
-                const neededFTE = m.committedFTE + likelyPipelineFTE;
-                return { month: m.label, gap: neededFTE - m.availableStaff };
-              });
+              const formatStartDate = (date) => {
+                if (!date) return '—';
+                return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+              };
 
               return (
                 <div style={styles.agendaSection}>
                   <h2 style={styles.agendaTitle}>Ops Meeting Agenda</h2>
-                  <div style={styles.agendaGrid}>
-                    <div style={styles.agendaCard}>
-                      <h3 style={styles.agendaCardTitle}>Current Situation</h3>
+                  
+                  {/* Current Situation */}
+                  <div style={{...styles.agendaCard, marginBottom: '24px'}}>
+                    <h3 style={styles.agendaCardTitle}>Current Situation</h3>
+                    <div style={styles.agendaGrid}>
                       <div style={styles.agendaItem}>
                         <span style={styles.agendaLabel}>Current Month Gap (Committed vs Target)</span>
                         <span style={{...styles.agendaValue, color: currentMonthCommittedGap <= 0 ? '#060' : '#c00'}}>
@@ -803,31 +819,51 @@ export default function CRMDashboard() {
                         </span>
                       </div>
                       <div style={styles.agendaItem}>
-                        <span style={styles.agendaLabel}>90-Day Likely Gap (Committed + 90%+ Prospects)</span>
-                        <span style={{...styles.agendaValue, color: likely90Gap <= 0 ? '#060' : '#c00'}}>
-                          {formatCurrency(likely90Gap > 0 ? -likely90Gap : Math.abs(likely90Gap))}
+                        <span style={styles.agendaLabel}>Current 90-Day Likely Gap</span>
+                        <span style={{...styles.agendaValue, color: first90.gap <= 0 ? '#060' : '#c00'}}>
+                          {formatCurrency(first90.gap > 0 ? -first90.gap : Math.abs(first90.gap))}
                         </span>
                       </div>
                     </div>
-                    <div style={styles.agendaCard}>
-                      <h3 style={styles.agendaCardTitle}>Gap Analysis</h3>
-                      <div style={styles.agendaItem}>
-                        <span style={styles.agendaLabel}>New Projects Needed (at $25K/wk)</span>
-                        <span style={{...styles.agendaValue, color: projectsNeeded > 0 ? '#c00' : '#060'}}>
-                          {projectsNeeded > 0 ? `${projectsNeeded} project${projectsNeeded > 1 ? 's' : ''}` : 'None'}
-                        </span>
-                      </div>
-                      <div style={styles.agendaItem}>
-                        <span style={styles.agendaLabel}>Staffing Gaps (Likely Revenue)</span>
-                        <div style={styles.staffingGapList}>
-                          {staffingGaps.map((sg, idx) => (
-                            <span key={idx} style={{...styles.staffingGapItem, color: sg.gap > 0 ? '#c00' : '#060'}}>
-                              {sg.month.split(' ')[0]}: {sg.gap > 0 ? '+' : ''}{sg.gap.toFixed(1)}
+                  </div>
+                  
+                  {/* Gap Analysis - Two periods side by side */}
+                  <div style={styles.agendaGrid}>
+                    {[first90, second90].map((period, idx) => (
+                      <div key={idx} style={styles.agendaCard}>
+                        <h3 style={styles.agendaCardTitle}>{period.periodLabel}</h3>
+                        <div style={styles.agendaItem}>
+                          <span style={styles.agendaLabel}>Likely Gap (Committed + 90%+ Prospects)</span>
+                          <span style={{...styles.agendaValue, color: period.gap <= 0 ? '#060' : '#c00'}}>
+                            {formatCurrency(period.gap > 0 ? -period.gap : Math.abs(period.gap))}
+                          </span>
+                        </div>
+                        <div style={styles.agendaItem}>
+                          <span style={styles.agendaLabel}>New Projects Needed (at $25K/wk)</span>
+                          <span style={{...styles.agendaValue, color: period.projectsNeeded > 0 ? '#c00' : '#060'}}>
+                            {period.projectsNeeded > 0 ? `${period.projectsNeeded} project${period.projectsNeeded > 1 ? 's' : ''}` : 'None'}
+                          </span>
+                        </div>
+                        {period.projectsNeeded > 0 && (
+                          <div style={styles.agendaItem}>
+                            <span style={styles.agendaLabel}>Required Start Date</span>
+                            <span style={{...styles.agendaValue, fontSize: '16px'}}>
+                              By {formatStartDate(period.requiredStartDate)}
                             </span>
-                          ))}
+                          </div>
+                        )}
+                        <div style={styles.agendaItem}>
+                          <span style={styles.agendaLabel}>Staffing Gaps (FTEs Needed - Available)</span>
+                          <div style={styles.staffingGapList}>
+                            {period.staffingGaps.map((sg, i) => (
+                              <span key={i} style={{...styles.staffingGapItem, color: sg.gap > 0 ? '#c00' : '#060'}}>
+                                {sg.month.split(' ')[0]}: {sg.gap > 0 ? '+' : ''}{sg.gap.toFixed(1)}
+                              </span>
+                            ))}
+                          </div>
                         </div>
                       </div>
-                    </div>
+                    ))}
                   </div>
                 </div>
               );
