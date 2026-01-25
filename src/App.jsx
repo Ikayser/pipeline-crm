@@ -8,7 +8,7 @@ const supabase = createClient(
 
 const STAGES = ['Lead', 'Contacted', 'Meeting', 'Proposal', 'Negotiation', 'Closed'];
 const PROJECT_STATUSES = ['Active', 'Completed', 'On Hold'];
-const WORK_TYPES = ['Strategy', 'Design'];
+const WORK_TYPES = ['Strategy', 'Design', 'Creative'];
 const BILLABLE_RATE = 290; // $ per hour average
 const HOURS_PER_WEEK = 36; // Adjusted for PTO, etc.
 const FREELANCE_DAY_RATE = 1000; // $ per day for freelancers
@@ -608,6 +608,58 @@ export default function CRMDashboard() {
                       </div>
                     ))}
                   </div>
+                </div>
+                <div style={styles.insightCard}>
+                  <h3 style={styles.insightTitle}>Pipeline by Lead Source</h3>
+                  {(() => {
+                    const newRevenue = prospects.filter(p => p.stage !== 'Closed' && (p.lead_source === 'new' || !p.lead_source)).reduce((sum, p) => sum + (p.budget || 0), 0);
+                    const organicRevenue = prospects.filter(p => p.stage !== 'Closed' && p.lead_source === 'organic').reduce((sum, p) => sum + (p.budget || 0), 0);
+                    const total = newRevenue + organicRevenue;
+                    return (
+                      <div style={styles.barChart}>
+                        <div style={styles.barRow}>
+                          <span style={styles.barLabel}>New</span>
+                          <div style={styles.barTrack}><div style={{...styles.barFill, width: `${total ? (newRevenue / total) * 100 : 0}%`}} /></div>
+                          <span style={styles.barValue}>{formatCurrency(newRevenue)}</span>
+                        </div>
+                        <div style={styles.barRow}>
+                          <span style={styles.barLabel}>Organic</span>
+                          <div style={styles.barTrack}><div style={{...styles.barFill, width: `${total ? (organicRevenue / total) * 100 : 0}%`, backgroundColor: '#666'}} /></div>
+                          <span style={styles.barValue}>{formatCurrency(organicRevenue)}</span>
+                        </div>
+                      </div>
+                    );
+                  })()}
+                </div>
+                <div style={styles.insightCard}>
+                  <h3 style={styles.insightTitle}>Pipeline by Work Type</h3>
+                  {(() => {
+                    // Calculate revenue split equally among selected work types
+                    const workTypeRevenue = { Strategy: 0, Design: 0, Creative: 0 };
+                    prospects.filter(p => p.stage !== 'Closed').forEach(p => {
+                      const types = parseWorkTypes(p.work_type);
+                      if (types.length > 0) {
+                        const revenuePerType = (p.budget || 0) / types.length;
+                        types.forEach(t => {
+                          if (workTypeRevenue[t] !== undefined) {
+                            workTypeRevenue[t] += revenuePerType;
+                          }
+                        });
+                      }
+                    });
+                    const total = Object.values(workTypeRevenue).reduce((sum, v) => sum + v, 0);
+                    return (
+                      <div style={styles.barChart}>
+                        {WORK_TYPES.map(type => (
+                          <div key={type} style={styles.barRow}>
+                            <span style={styles.barLabel}>{type}</span>
+                            <div style={styles.barTrack}><div style={{...styles.barFill, width: `${total ? (workTypeRevenue[type] / total) * 100 : 0}%`, backgroundColor: type === 'Strategy' ? '#000' : type === 'Design' ? '#666' : '#999'}} /></div>
+                            <span style={styles.barValue}>{formatCurrency(workTypeRevenue[type])}</span>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
                 <div style={styles.insightCard}>
                   <h3 style={styles.insightTitle}>Needs Attention</h3>
@@ -1457,7 +1509,7 @@ function AuthScreen() {
 
 function ProspectForm({ prospect, onSave, onCancel }) {
   const autoFTE = prospect ? calculateFTE(prospect.budget, prospect.duration) : 0;
-  const [form, setForm] = useState(prospect ? { ...prospect, project_name: prospect.project_name || '', work_type: prospect.work_type || '', last_engagement: prospect.last_engagement || new Date().toISOString().split('T')[0], start_date: prospect.start_date || '', duration: prospect.duration || 1, probability: prospect.probability || 50, staffing_fte: prospect.staffing_fte } : { project_name: '', company: '', contact: '', linkedin: '', title: '', work_type: '', budget: 0, stage: 'Lead', last_engagement: new Date().toISOString().split('T')[0], context: '', start_date: '', duration: 1, probability: 50, staffing_fte: null });
+  const [form, setForm] = useState(prospect ? { ...prospect, project_name: prospect.project_name || '', work_type: prospect.work_type || '', last_engagement: prospect.last_engagement || new Date().toISOString().split('T')[0], start_date: prospect.start_date || '', duration: prospect.duration || 1, probability: prospect.probability || 50, staffing_fte: prospect.staffing_fte, lead_source: prospect.lead_source || 'new' } : { project_name: '', company: '', contact: '', linkedin: '', title: '', work_type: '', budget: 0, stage: 'Lead', last_engagement: new Date().toISOString().split('T')[0], context: '', start_date: '', duration: 1, probability: 50, staffing_fte: null, lead_source: 'new' });
   const selectedWorkTypes = form.work_type ? form.work_type.split(',').map(t => t.trim()).filter(Boolean) : [];
   const toggleWorkType = (type) => { const newTypes = selectedWorkTypes.includes(type) ? selectedWorkTypes.filter(t => t !== type) : [...selectedWorkTypes, type]; setForm({ ...form, work_type: newTypes.join(',') }); };
   
@@ -1471,7 +1523,8 @@ function ProspectForm({ prospect, onSave, onCancel }) {
       duration: Number(form.duration), 
       probability: Number(form.probability), 
       start_date: form.start_date || null,
-      staffing_fte: form.staffing_fte !== null && form.staffing_fte !== '' ? Number(form.staffing_fte) : null
+      staffing_fte: form.staffing_fte !== null && form.staffing_fte !== '' ? Number(form.staffing_fte) : null,
+      lead_source: form.lead_source
     }); 
   };
 
@@ -1494,10 +1547,19 @@ function ProspectForm({ prospect, onSave, onCancel }) {
             <div style={styles.formGroup}><label style={styles.formLabel}>Title / Role</label><input type="text" value={form.title || ''} onChange={e => setForm({ ...form, title: e.target.value })} placeholder="e.g. VP of Engineering" style={styles.input} /></div>
           </div>
           <div style={styles.formGroup}><label style={styles.formLabel}>Company</label><input type="text" value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} style={styles.input} required /></div>
-          <div style={styles.formGroup}>
-            <label style={styles.formLabel}>Work Type</label>
-            <div style={styles.workTypeSelector}>
-              {WORK_TYPES.map(type => <button key={type} type="button" onClick={() => toggleWorkType(type)} style={{...styles.workTypeButton, ...(selectedWorkTypes.includes(type) ? styles.workTypeButtonActive : {})}}>{type}</button>)}
+          <div style={styles.formRow}>
+            <div style={styles.formGroup}>
+              <label style={styles.formLabel}>Work Type</label>
+              <div style={styles.workTypeSelector}>
+                {WORK_TYPES.map(type => <button key={type} type="button" onClick={() => toggleWorkType(type)} style={{...styles.workTypeButton, ...(selectedWorkTypes.includes(type) ? styles.workTypeButtonActive : {})}}>{type}</button>)}
+              </div>
+            </div>
+            <div style={styles.formGroup}>
+              <label style={styles.formLabel}>Lead Source</label>
+              <div style={styles.workTypeSelector}>
+                <button type="button" onClick={() => setForm({ ...form, lead_source: 'new' })} style={{...styles.workTypeButton, ...(form.lead_source === 'new' ? styles.workTypeButtonActive : {})}}>New</button>
+                <button type="button" onClick={() => setForm({ ...form, lead_source: 'organic' })} style={{...styles.workTypeButton, ...(form.lead_source === 'organic' ? styles.workTypeButtonActive : {})}}>Organic</button>
+              </div>
             </div>
           </div>
           <div style={styles.formDivider} />
