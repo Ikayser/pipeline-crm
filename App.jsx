@@ -31,6 +31,74 @@ const getNext12Months = () => {
 
 const MONTHS = getNext12Months();
 
+// US Federal Holidays 2026 (and 2025 for edge cases)
+const HOLIDAYS = [
+  // 2025
+  '2025-01-01', '2025-01-20', '2025-02-17', '2025-05-26', '2025-07-04',
+  '2025-09-01', '2025-10-13', '2025-11-11', '2025-11-27', '2025-12-25',
+  // 2026
+  '2026-01-01', '2026-01-19', '2026-02-16', '2026-05-25', '2026-07-03',
+  '2026-09-07', '2026-10-12', '2026-11-11', '2026-11-26', '2026-12-25',
+  // 2027
+  '2027-01-01', '2027-01-18', '2027-02-15', '2027-05-31', '2027-07-05',
+  '2027-09-06', '2027-10-11', '2027-11-11', '2027-11-25', '2027-12-24',
+].map(d => d);
+
+// Check if a date is a business day (weekday and not a holiday)
+const isBusinessDay = (date) => {
+  const day = date.getDay();
+  if (day === 0 || day === 6) return false; // Weekend
+  const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  return !HOLIDAYS.includes(dateStr);
+};
+
+// Get business days between two dates (inclusive of start, exclusive of end)
+const getBusinessDaysBetween = (startDate, endDate) => {
+  let count = 0;
+  const current = new Date(startDate);
+  while (current < endDate) {
+    if (isBusinessDay(current)) count++;
+    current.setDate(current.getDate() + 1);
+  }
+  return count;
+};
+
+// Calculate monthly revenue distribution based on business days
+const calculateMonthlyRevenueByBusinessDays = (startDateStr, durationWeeks, totalValue, months) => {
+  const result = {};
+  const startDate = parseLocalDate(startDateStr);
+  if (!startDate || !totalValue || !durationWeeks) return result;
+  
+  // Calculate end date (duration in weeks * 7 days)
+  const endDate = new Date(startDate);
+  endDate.setDate(endDate.getDate() + (durationWeeks * 7));
+  
+  // Get total business days in the project
+  const totalBusinessDays = getBusinessDaysBetween(startDate, endDate);
+  if (totalBusinessDays === 0) return result;
+  
+  const revenuePerBusinessDay = totalValue / totalBusinessDays;
+  
+  // For each month, count business days that fall within the project period
+  months.forEach(m => {
+    const monthStart = new Date(m.date.getFullYear(), m.date.getMonth(), 1);
+    const monthEnd = new Date(m.date.getFullYear(), m.date.getMonth() + 1, 1);
+    
+    // Find overlap between project period and this month
+    const overlapStart = new Date(Math.max(startDate.getTime(), monthStart.getTime()));
+    const overlapEnd = new Date(Math.min(endDate.getTime(), monthEnd.getTime()));
+    
+    if (overlapStart < overlapEnd) {
+      const businessDaysInMonth = getBusinessDaysBetween(overlapStart, overlapEnd);
+      if (businessDaysInMonth > 0) {
+        result[m.key] = businessDaysInMonth * revenuePerBusinessDay;
+      }
+    }
+  });
+  
+  return result;
+};
+
 // Parse date string as local date (not UTC) to avoid timezone shift
 const parseLocalDate = (dateStr) => {
   if (!dateStr) return null;
@@ -278,47 +346,72 @@ export default function CRMDashboard() {
       freelanceFTE: calculateFreelanceFTE(settings.freelanceBudget[m.key] || 0)
     }));
 
-    // Add committed revenue and FTEs from projects
+    // Add committed revenue and FTEs from projects (using business days)
     projects.filter(p => p.status === 'Active').forEach(p => {
       if (!p.start_date || !p.contract_value) return;
-      const startDate = parseLocalDate(p.start_date);
-      if (!startDate) return;
-      const durationWeeks = p.duration || 1;
-      const weeklyRevenue = p.contract_value / durationWeeks;
-      const weeklyFTE = p.staffing_fte != null ? p.staffing_fte / (durationWeeks / 4) : calculateFTE(p.contract_value, durationWeeks);
       
-      for (let week = 0; week < durationWeeks; week++) {
-        const revenueDate = new Date(startDate);
-        revenueDate.setDate(revenueDate.getDate() + (week * 7));
-        const monthKey = `${revenueDate.getFullYear()}-${String(revenueDate.getMonth() + 1).padStart(2, '0')}`;
-        const monthIndex = months.findIndex(m => m.key === monthKey);
-        if (monthIndex !== -1) {
-          months[monthIndex].committedRevenue += weeklyRevenue;
-          months[monthIndex].committedFTE += weeklyFTE / 4; // Convert weekly to monthly
-        }
+      // If there are manual overrides, use those
+      if (p.monthly_revenue && Object.keys(p.monthly_revenue).length > 0) {
+        Object.entries(p.monthly_revenue).forEach(([monthKey, revenue]) => {
+          const monthIndex = months.findIndex(m => m.key === monthKey);
+          if (monthIndex !== -1) {
+            months[monthIndex].committedRevenue += revenue;
+            // Calculate FTE proportionally
+            const totalValue = Object.values(p.monthly_revenue).reduce((sum, v) => sum + v, 0);
+            const fteTotal = p.staffing_fte != null ? p.staffing_fte : calculateFTE(p.contract_value, p.duration || 1) * (p.duration || 1) / 4;
+            months[monthIndex].committedFTE += fteTotal * (revenue / totalValue);
+          }
+        });
+      } else {
+        // Use business days calculation
+        const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.contract_value, MONTHS);
+        const totalFTE = p.staffing_fte != null ? p.staffing_fte : calculateFTE(p.contract_value, p.duration || 1) * (p.duration || 1) / 4;
+        const totalRevenue = Object.values(monthlyRevenue).reduce((sum, v) => sum + v, 0) || 1;
+        
+        Object.entries(monthlyRevenue).forEach(([monthKey, revenue]) => {
+          const monthIndex = months.findIndex(m => m.key === monthKey);
+          if (monthIndex !== -1) {
+            months[monthIndex].committedRevenue += revenue;
+            months[monthIndex].committedFTE += totalFTE * (revenue / totalRevenue);
+          }
+        });
       }
     });
 
-    // Add pipeline revenue and FTEs from prospects
+    // Add pipeline revenue and FTEs from prospects (using business days)
     prospects.filter(p => p.stage !== 'Closed').forEach(p => {
       if (!p.start_date || !p.budget) return;
-      const startDate = parseLocalDate(p.start_date);
-      if (!startDate) return;
-      const durationWeeks = p.duration || 1;
       const probability = (p.probability || 50) / 100;
-      const weeklyRevenue = p.budget / durationWeeks;
-      const weeklyFTE = p.staffing_fte != null ? p.staffing_fte / (durationWeeks / 4) : calculateFTE(p.budget, durationWeeks);
       
-      for (let week = 0; week < durationWeeks; week++) {
-        const revenueDate = new Date(startDate);
-        revenueDate.setDate(revenueDate.getDate() + (week * 7));
-        const monthKey = `${revenueDate.getFullYear()}-${String(revenueDate.getMonth() + 1).padStart(2, '0')}`;
-        const monthIndex = months.findIndex(m => m.key === monthKey);
-        if (monthIndex !== -1) {
-          months[monthIndex].pipelineRevenue += weeklyRevenue;
-          months[monthIndex].pipelineRevenueWeighted += weeklyRevenue * probability;
-          months[monthIndex].pipelineFTE += weeklyFTE / 4;
-          months[monthIndex].pipelineFTEWeighted += (weeklyFTE / 4) * probability;
+      // If there are manual overrides, use those
+      if (p.monthly_revenue && Object.keys(p.monthly_revenue).length > 0) {
+        Object.entries(p.monthly_revenue).forEach(([monthKey, revenue]) => {
+          const monthIndex = months.findIndex(m => m.key === monthKey);
+          if (monthIndex !== -1) {
+            months[monthIndex].pipelineRevenue += revenue;
+            months[monthIndex].pipelineRevenueWeighted += revenue * probability;
+            // Calculate FTE proportionally
+            const totalValue = Object.values(p.monthly_revenue).reduce((sum, v) => sum + v, 0);
+            const fteTotal = p.staffing_fte != null ? p.staffing_fte : calculateFTE(p.budget, p.duration || 1) * (p.duration || 1) / 4;
+            months[monthIndex].pipelineFTE += fteTotal * (revenue / totalValue);
+            months[monthIndex].pipelineFTEWeighted += fteTotal * (revenue / totalValue) * probability;
+          }
+        });
+      } else {
+        // Use business days calculation
+        const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
+        const totalFTE = p.staffing_fte != null ? p.staffing_fte : calculateFTE(p.budget, p.duration || 1) * (p.duration || 1) / 4;
+        const totalRevenue = Object.values(monthlyRevenue).reduce((sum, v) => sum + v, 0) || 1;
+        
+        Object.entries(monthlyRevenue).forEach(([monthKey, revenue]) => {
+          const monthIndex = months.findIndex(m => m.key === monthKey);
+          if (monthIndex !== -1) {
+            months[monthIndex].pipelineRevenue += revenue;
+            months[monthIndex].pipelineRevenueWeighted += revenue * probability;
+            months[monthIndex].pipelineFTE += totalFTE * (revenue / totalRevenue);
+            months[monthIndex].pipelineFTEWeighted += totalFTE * (revenue / totalRevenue) * probability;
+          }
+        });
         }
       }
     });
@@ -665,24 +758,14 @@ export default function CRMDashboard() {
               // Current month committed gap
               const currentMonthCommittedGap = currentMonth.target - currentMonth.committedRevenue;
               
-              // 90-day likely: committed + 90%+ probability prospects
+              // 90-day likely: committed + 90%+ probability prospects (using business days)
               const likely90Revenue = next3Months.reduce((sum, m) => {
                 const likelyPipeline = prospects
                   .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
                   .reduce((pSum, p) => {
                     if (!p.start_date || !p.budget) return pSum;
-                    const startDate = parseLocalDate(p.start_date);
-                    if (!startDate) return pSum;
-                    const durationWeeks = p.duration || 1;
-                    const weeklyRevenue = p.budget / durationWeeks;
-                    let monthRevenue = 0;
-                    for (let week = 0; week < durationWeeks; week++) {
-                      const revenueDate = new Date(startDate);
-                      revenueDate.setDate(revenueDate.getDate() + (week * 7));
-                      const monthKey = `${revenueDate.getFullYear()}-${String(revenueDate.getMonth() + 1).padStart(2, '0')}`;
-                      if (monthKey === m.key) monthRevenue += weeklyRevenue;
-                    }
-                    return pSum + monthRevenue;
+                    const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
+                    return pSum + (monthlyRevenue[m.key] || 0);
                   }, 0);
                 return sum + m.committedRevenue + likelyPipeline;
               }, 0);
@@ -692,24 +775,17 @@ export default function CRMDashboard() {
               // Projects needed calculation
               const projectsNeeded = likely90Gap > 0 ? Math.ceil(likely90Gap / (WEEKLY_RUN_RATE * 4)) : 0;
               
-              // Staffing gaps for likely revenue
+              // Staffing gaps for likely revenue (using business days)
               const staffingGaps = next3Months.map(m => {
                 const likelyPipelineFTE = prospects
                   .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
                   .reduce((pSum, p) => {
                     if (!p.start_date || !p.budget) return pSum;
-                    const startDate = parseLocalDate(p.start_date);
-                    if (!startDate) return pSum;
-                    const durationWeeks = p.duration || 1;
-                    const weeklyFTE = p.staffing_fte != null ? p.staffing_fte / (durationWeeks / 4) : calculateFTE(p.budget, durationWeeks);
-                    let monthFTE = 0;
-                    for (let week = 0; week < durationWeeks; week++) {
-                      const revenueDate = new Date(startDate);
-                      revenueDate.setDate(revenueDate.getDate() + (week * 7));
-                      const monthKey = `${revenueDate.getFullYear()}-${String(revenueDate.getMonth() + 1).padStart(2, '0')}`;
-                      if (monthKey === m.key) monthFTE += weeklyFTE / 4;
-                    }
-                    return pSum + monthFTE;
+                    const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
+                    const totalRevenue = Object.values(monthlyRevenue).reduce((s, v) => s + v, 0) || 1;
+                    const totalFTE = p.staffing_fte != null ? p.staffing_fte : calculateFTE(p.budget, p.duration || 1) * (p.duration || 1) / 4;
+                    const monthRevenue = monthlyRevenue[m.key] || 0;
+                    return pSum + totalFTE * (monthRevenue / totalRevenue);
                   }, 0);
                 const neededFTE = m.committedFTE + likelyPipelineFTE;
                 return { month: m.label, gap: neededFTE - m.availableStaff };
@@ -1029,26 +1105,12 @@ export default function CRMDashboard() {
 
 // Helper function to calculate auto-distributed monthly revenue
 function calculateAutoMonthlyRevenue(item, months, type) {
-  const result = {};
-  const startDate = parseLocalDate(item.start_date);
-  const durationWeeks = item.duration || 1;
   const totalValue = type === 'project' ? (item.contract_value || 0) : (item.budget || 0);
+  const durationWeeks = item.duration || 1;
   
-  if (!startDate || !totalValue) return result;
+  if (!item.start_date || !totalValue) return {};
   
-  const weeklyRevenue = totalValue / durationWeeks;
-  
-  for (let week = 0; week < durationWeeks; week++) {
-    const revenueDate = new Date(startDate);
-    revenueDate.setDate(revenueDate.getDate() + (week * 7));
-    const monthKey = `${revenueDate.getFullYear()}-${String(revenueDate.getMonth() + 1).padStart(2, '0')}`;
-    
-    if (months.some(m => m.key === monthKey)) {
-      result[monthKey] = (result[monthKey] || 0) + weeklyRevenue;
-    }
-  }
-  
-  return result;
+  return calculateMonthlyRevenueByBusinessDays(item.start_date, durationWeeks, totalValue, months);
 }
 
 function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate }) {
