@@ -412,7 +412,6 @@ export default function CRMDashboard() {
             months[monthIndex].pipelineFTEWeighted += totalFTE * (revenue / totalRevenue) * probability;
           }
         });
-        }
       }
     });
 
