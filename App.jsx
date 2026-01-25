@@ -243,7 +243,7 @@ export default function CRMDashboard() {
       project_name: prospect.project_name, company: prospect.company, contact: prospect.contact, title: prospect.title, linkedin: prospect.linkedin,
       work_type: prospect.work_type, budget: prospect.budget, stage: prospect.stage, last_engagement: prospect.last_engagement,
       context: prospect.context, start_date: prospect.start_date, duration: prospect.duration, probability: prospect.probability,
-      staffing_fte: prospect.staffing_fte
+      staffing_fte: prospect.staffing_fte, lead_source: prospect.lead_source || 'new'
     };
     if (prospect.id) {
       await supabase.from('prospects').update(data).eq('id', prospect.id);
