@@ -469,6 +469,7 @@ export default function CRMDashboard() {
         <button onClick={() => setMasterTab('projects')} style={{...styles.masterTab, ...(masterTab === 'projects' ? styles.masterTabActive : {})}}>Projects</button>
         <button onClick={() => setMasterTab('ops-dashboard')} style={{...styles.masterTab, ...(masterTab === 'ops-dashboard' ? styles.masterTabActive : {})}}>Ops Dashboard</button>
         <button onClick={() => setMasterTab('settings')} style={{...styles.masterTab, ...(masterTab === 'settings' ? styles.masterTabActive : {})}}>Settings</button>
+        <button onClick={() => setMasterTab('assumptions')} style={{...styles.masterTabSmall, ...(masterTab === 'assumptions' ? styles.masterTabActive : {})}}>?</button>
       </div>
 
       {/* PIPELINE TAB */}
@@ -791,7 +792,7 @@ export default function CRMDashboard() {
             </div>
             <div style={styles.navActions}>
               <div style={styles.projectionToggle}>
-                <button onClick={() => setShowWeighted(false)} style={{...styles.toggleButton, ...(!showWeighted ? styles.toggleButtonActive : {})}}>Estimated Pipeline</button>
+                <button onClick={() => setShowWeighted(false)} style={{...styles.toggleButton, ...(!showWeighted ? styles.toggleButtonActive : {})}}>Committed Only</button>
                 <button onClick={() => setShowWeighted(true)} style={{...styles.toggleButton, ...(showWeighted ? styles.toggleButtonActive : {})}}>Weighted Pipeline</button>
               </div>
             </div>
@@ -801,6 +802,7 @@ export default function CRMDashboard() {
             {/* Ops Meeting Agenda */}
             {(() => {
               const WEEKLY_RUN_RATE = 25000;
+              const DEFAULT_PROJECT_WEEKS = 12;
               const currentMonth = projectionData[0];
               const next3Months = projectionData.slice(0, 3);
               const following3Months = projectionData.slice(3, 6);
@@ -809,8 +811,10 @@ export default function CRMDashboard() {
               const currentMonthCommittedGap = currentMonth.target - currentMonth.committedRevenue;
               
               // Helper function to calculate gap analysis for a 3-month period
+              // Projects needed is calculated per-month to ensure EVERY month meets target
               const calculateGapAnalysis = (months, periodLabel) => {
-                const likelyRevenue = months.reduce((sum, m) => {
+                // Calculate likely revenue per month (committed + 90%+ prospects)
+                const monthlyData = months.map(m => {
                   const likelyPipeline = prospects
                     .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
                     .reduce((pSum, p) => {
@@ -818,14 +822,29 @@ export default function CRMDashboard() {
                       const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
                       return pSum + (monthlyRevenue[m.key] || 0);
                     }, 0);
-                  return sum + m.committedRevenue + likelyPipeline;
-                }, 0);
-                const target = months.reduce((sum, m) => sum + m.target, 0);
-                const gap = target - likelyRevenue;
-                const projectsNeeded = gap > 0 ? Math.ceil(gap / (WEEKLY_RUN_RATE * 4)) : 0;
+                  const likelyRevenue = m.committedRevenue + likelyPipeline;
+                  const gap = m.target - likelyRevenue;
+                  return { month: m, likelyRevenue, gap };
+                });
+                
+                const totalLikelyRevenue = monthlyData.reduce((sum, d) => sum + d.likelyRevenue, 0);
+                const totalTarget = months.reduce((sum, m) => sum + m.target, 0);
+                const totalGap = totalTarget - totalLikelyRevenue;
+                
+                // Calculate projects/weeks needed to fill EACH month's gap
+                // A $25K/week project running 12 weeks = $300K total
+                // Revenue per week = $25K, so gap / $25K = weeks needed
+                let totalWeeksNeeded = 0;
+                const monthGapDetails = monthlyData.map(d => {
+                  const weeksNeeded = d.gap > 0 ? Math.ceil(d.gap / WEEKLY_RUN_RATE) : 0;
+                  totalWeeksNeeded += weeksNeeded;
+                  return { month: d.month.label.split(' ')[0], gap: d.gap, weeksNeeded };
+                });
+                
+                // Convert total weeks to projects (12 weeks each)
+                const projectsNeeded = totalWeeksNeeded > 0 ? Math.ceil(totalWeeksNeeded / DEFAULT_PROJECT_WEEKS) : 0;
                 
                 // Calculate required start date to fill gap
-                // Projects need to start early enough to generate revenue in the period
                 const periodStart = months[0]?.date;
                 const requiredStartDate = periodStart ? new Date(periodStart) : null;
                 
@@ -845,7 +864,7 @@ export default function CRMDashboard() {
                   return { month: m.label, gap: neededFTE - m.availableStaff };
                 });
                 
-                return { likelyRevenue, target, gap, projectsNeeded, requiredStartDate, staffingGaps, periodLabel };
+                return { totalLikelyRevenue, totalTarget, totalGap, projectsNeeded, totalWeeksNeeded, monthGapDetails, requiredStartDate, staffingGaps, periodLabel };
               };
               
               const first90 = calculateGapAnalysis(next3Months, 'Current 90 Days');
@@ -872,8 +891,8 @@ export default function CRMDashboard() {
                       </div>
                       <div style={styles.agendaItem}>
                         <span style={styles.agendaLabel}>Current 90-Day Likely Gap</span>
-                        <span style={{...styles.agendaValue, color: first90.gap <= 0 ? '#060' : '#c00'}}>
-                          {formatCurrency(first90.gap > 0 ? -first90.gap : Math.abs(first90.gap))}
+                        <span style={{...styles.agendaValue, color: first90.totalGap <= 0 ? '#060' : '#c00'}}>
+                          {formatCurrency(first90.totalGap > 0 ? -first90.totalGap : Math.abs(first90.totalGap))}
                         </span>
                       </div>
                     </div>
@@ -886,14 +905,24 @@ export default function CRMDashboard() {
                         <h3 style={styles.agendaCardTitle}>{period.periodLabel}</h3>
                         <div style={styles.agendaItem}>
                           <span style={styles.agendaLabel}>Likely Gap (Committed + 90%+ Prospects)</span>
-                          <span style={{...styles.agendaValue, color: period.gap <= 0 ? '#060' : '#c00'}}>
-                            {formatCurrency(period.gap > 0 ? -period.gap : Math.abs(period.gap))}
+                          <span style={{...styles.agendaValue, color: period.totalGap <= 0 ? '#060' : '#c00'}}>
+                            {formatCurrency(period.totalGap > 0 ? -period.totalGap : Math.abs(period.totalGap))}
                           </span>
                         </div>
                         <div style={styles.agendaItem}>
-                          <span style={styles.agendaLabel}>New Projects Needed (at $25K/wk)</span>
+                          <span style={styles.agendaLabel}>Monthly Gaps</span>
+                          <div style={styles.staffingGapList}>
+                            {period.monthGapDetails.map((mg, i) => (
+                              <span key={i} style={{...styles.staffingGapItem, color: mg.gap > 0 ? '#c00' : '#060'}}>
+                                {mg.month}: {formatCurrency(mg.gap > 0 ? -mg.gap : Math.abs(mg.gap))}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                        <div style={styles.agendaItem}>
+                          <span style={styles.agendaLabel}>New Work Needed ($25K/wk × 12wk projects)</span>
                           <span style={{...styles.agendaValue, color: period.projectsNeeded > 0 ? '#c00' : '#060'}}>
-                            {period.projectsNeeded > 0 ? `${period.projectsNeeded} project${period.projectsNeeded > 1 ? 's' : ''}` : 'None'}
+                            {period.projectsNeeded > 0 ? `${period.projectsNeeded} project${period.projectsNeeded > 1 ? 's' : ''} (${period.totalWeeksNeeded} weeks)` : 'None'}
                           </span>
                         </div>
                         {period.projectsNeeded > 0 && (
@@ -926,7 +955,7 @@ export default function CRMDashboard() {
               <h2 style={styles.projectionTitle}>Next 3 Months Detail</h2>
               <div style={styles.threeMonthGrid}>
                 {projectionData.slice(0, 3).map((month, idx) => {
-                  const pipeline = showWeighted ? month.pipelineRevenueWeighted : month.pipelineRevenue;
+                  const pipeline = showWeighted ? month.pipelineRevenueWeighted : 0;
                   const committedGap = month.target - month.committedRevenue;
                   const totalGap = month.target - (month.committedRevenue + pipeline);
                   return (
@@ -946,21 +975,63 @@ export default function CRMDashboard() {
                           {formatCurrency(-committedGap)}
                         </span>
                       </div>
-                      <div style={styles.threeMonthDivider} />
-                      <div style={styles.threeMonthRow}>
-                        <span style={styles.threeMonthLabel}>Committed + {showWeighted ? 'Weighted' : 'Estimated'}</span>
-                        <span style={styles.threeMonthValue}>{formatCurrency(month.committedRevenue + pipeline)}</span>
-                      </div>
-                      <div style={styles.threeMonthRow}>
-                        <span style={styles.threeMonthLabel}>Gap (Target - Total)</span>
-                        <span style={{...styles.threeMonthValue, color: totalGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>
-                          {formatCurrency(-totalGap)}
-                        </span>
-                      </div>
+                      {showWeighted && (
+                        <>
+                          <div style={styles.threeMonthDivider} />
+                          <div style={styles.threeMonthRow}>
+                            <span style={styles.threeMonthLabel}>Committed + Weighted</span>
+                            <span style={styles.threeMonthValue}>{formatCurrency(month.committedRevenue + pipeline)}</span>
+                          </div>
+                          <div style={styles.threeMonthRow}>
+                            <span style={styles.threeMonthLabel}>Gap (Target - Total)</span>
+                            <span style={{...styles.threeMonthValue, color: totalGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>
+                              {formatCurrency(-totalGap)}
+                            </span>
+                          </div>
+                        </>
+                      )}
                     </div>
                   );
                 })}
               </div>
+              {/* Quarter Summary */}
+              {(() => {
+                const q1Data = projectionData.slice(0, 3);
+                const qTarget = q1Data.reduce((sum, m) => sum + m.target, 0);
+                const qCommitted = q1Data.reduce((sum, m) => sum + m.committedRevenue, 0);
+                const qPipeline = showWeighted ? q1Data.reduce((sum, m) => sum + m.pipelineRevenueWeighted, 0) : 0;
+                const qCommittedGap = qTarget - qCommitted;
+                const qTotalGap = qTarget - (qCommitted + qPipeline);
+                return (
+                  <div style={{...styles.threeMonthCard, marginTop: '16px', backgroundColor: '#f5f5f5'}}>
+                    <h3 style={styles.threeMonthTitle}>Quarter Total</h3>
+                    <div style={{display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px'}}>
+                      <div>
+                        <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>Target</span><span style={styles.threeMonthValue}>{formatCurrency(qTarget)}</span></div>
+                      </div>
+                      <div>
+                        <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>Committed</span><span style={styles.threeMonthValue}>{formatCurrency(qCommitted)}</span></div>
+                      </div>
+                      <div>
+                        <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>Gap</span><span style={{...styles.threeMonthValue, color: qCommittedGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>{formatCurrency(-qCommittedGap)}</span></div>
+                      </div>
+                    </div>
+                    {showWeighted && (
+                      <div style={{display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #ddd'}}>
+                        <div>
+                          <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>+ Weighted</span><span style={styles.threeMonthValue}>{formatCurrency(qPipeline)}</span></div>
+                        </div>
+                        <div>
+                          <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>Total</span><span style={styles.threeMonthValue}>{formatCurrency(qCommitted + qPipeline)}</span></div>
+                        </div>
+                        <div>
+                          <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>Gap</span><span style={{...styles.threeMonthValue, color: qTotalGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>{formatCurrency(-qTotalGap)}</span></div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Revenue Chart */}
@@ -970,22 +1041,26 @@ export default function CRMDashboard() {
               </div>
               <div style={styles.chartLegend}>
                 <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#000'}} /><span>Committed</span></div>
-                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#999'}} /><span>Pipeline</span></div>
+                {showWeighted && <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#999'}} /><span>Pipeline</span></div>}
                 <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: 'transparent', border: '2px solid #c00'}} /><span>Target</span></div>
               </div>
               <div style={styles.chartContainer}>
                 <div style={styles.chartYAxis}><span>{formatCurrency(maxRevenue)}</span><span>{formatCurrency(maxRevenue / 2)}</span><span>$0</span></div>
                 <div style={styles.chart}>
                   {projectionData.map((month, idx) => {
-                    const pipeline = showWeighted ? month.pipelineRevenueWeighted : month.pipelineRevenue;
+                    const pipeline = showWeighted ? month.pipelineRevenueWeighted : 0;
                     const total = month.committedRevenue + pipeline;
                     return (
                       <div key={idx} style={styles.chartBar}>
                         <div style={styles.chartBarStack}>
-                          <div style={{...styles.chartBarSegment, height: `${maxRevenue ? (pipeline / maxRevenue) * 100 : 0}%`, backgroundColor: '#999'}} />
+                          {showWeighted && <div style={{...styles.chartBarSegment, height: `${maxRevenue ? (pipeline / maxRevenue) * 100 : 0}%`, backgroundColor: '#999'}} />}
                           <div style={{...styles.chartBarSegment, height: `${maxRevenue ? (month.committedRevenue / maxRevenue) * 100 : 0}%`, backgroundColor: '#000'}} />
                         </div>
-                        {month.target > 0 && <div style={{...styles.targetLine, bottom: `${(month.target / maxRevenue) * 100}%`}} />}
+                        {month.target > 0 && (
+                          <div style={{...styles.targetLine, bottom: `${(month.target / maxRevenue) * 100}%`}}>
+                            <span style={styles.targetLineLabel}>{formatCurrency(month.target)}</span>
+                          </div>
+                        )}
                         <div style={styles.chartBarLabel}>{month.label}</div>
                         {total > 0 && <div style={styles.chartBarValue}>{formatCurrency(total)}</div>}
                       </div>
@@ -994,9 +1069,9 @@ export default function CRMDashboard() {
                 </div>
               </div>
               <div style={styles.projectionSummary}>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>12-Month Total</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : m.pipelineRevenue), 0))}</span></div>
+                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>12-Month Total</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : 0), 0))}</span></div>
                 <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>12-Month Target</span><span style={styles.projectionSummaryValue}>{formatCurrency(annualTarget)}</span></div>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Gap</span><span style={{...styles.projectionSummaryValue, color: projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : m.pipelineRevenue), 0) >= annualTarget ? '#060' : '#c00'}}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : m.pipelineRevenue), 0) - annualTarget)}</span></div>
+                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Gap</span><span style={{...styles.projectionSummaryValue, color: projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : 0), 0) >= annualTarget ? '#060' : '#c00'}}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : 0), 0) - annualTarget)}</span></div>
               </div>
             </div>
 
@@ -1181,6 +1256,71 @@ export default function CRMDashboard() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ASSUMPTIONS TAB */}
+      {masterTab === 'assumptions' && (
+        <main style={styles.main}>
+          <div style={styles.assumptionsPage}>
+            <h2 style={styles.assumptionsTitle}>Calculation Assumptions</h2>
+            
+            <div style={styles.assumptionSection}>
+              <h3 style={styles.assumptionSectionTitle}>Revenue & Billing</h3>
+              <ul style={styles.assumptionList}>
+                <li><strong>Billable Rate:</strong> $290/hour</li>
+                <li><strong>Hours per Week:</strong> 36 hours (adjusted for PTO)</li>
+                <li><strong>Freelance Day Rate:</strong> $1,000/day</li>
+                <li><strong>Working Days per Month:</strong> 20 (average)</li>
+              </ul>
+            </div>
+            
+            <div style={styles.assumptionSection}>
+              <h3 style={styles.assumptionSectionTitle}>Revenue Allocation</h3>
+              <ul style={styles.assumptionList}>
+                <li><strong>Method:</strong> Revenue is distributed proportionally across business days</li>
+                <li><strong>Business Days:</strong> Weekdays (Mon-Fri) excluding US federal holidays</li>
+                <li><strong>Example:</strong> A $500K project over 10 weeks allocates ~$10K per business day to each month based on overlap</li>
+              </ul>
+            </div>
+            
+            <div style={styles.assumptionSection}>
+              <h3 style={styles.assumptionSectionTitle}>FTE Calculations</h3>
+              <ul style={styles.assumptionList}>
+                <li><strong>Formula:</strong> FTEs = Weekly Revenue ÷ $290/hour ÷ 36 hours</li>
+                <li><strong>Example:</strong> $25K/week ÷ $290 ÷ 36 = 2.4 FTEs</li>
+                <li><strong>Freelance FTEs:</strong> Monthly Budget ÷ $1,000/day ÷ 20 working days</li>
+              </ul>
+            </div>
+            
+            <div style={styles.assumptionSection}>
+              <h3 style={styles.assumptionSectionTitle}>Gap Analysis</h3>
+              <ul style={styles.assumptionList}>
+                <li><strong>Default Project Assumption:</strong> $25K/week run rate, 12 weeks duration ($300K total)</li>
+                <li><strong>Projects Needed:</strong> Calculated to fill the gap in EACH month individually, not just quarterly totals</li>
+                <li><strong>90%+ Likely:</strong> Includes committed revenue plus prospects with ≥90% probability</li>
+                <li><strong>Staffing Gap:</strong> FTEs Needed − Available Staff (positive = need more people)</li>
+              </ul>
+            </div>
+            
+            <div style={styles.assumptionSection}>
+              <h3 style={styles.assumptionSectionTitle}>Pipeline Views</h3>
+              <ul style={styles.assumptionList}>
+                <li><strong>Committed:</strong> Only active projects (no prospects)</li>
+                <li><strong>Weighted Pipeline:</strong> Prospect budget × probability %</li>
+                <li><strong>Work Type Revenue Split:</strong> If multiple types selected, revenue splits equally between them</li>
+              </ul>
+            </div>
+            
+            <div style={styles.assumptionSection}>
+              <h3 style={styles.assumptionSectionTitle}>US Federal Holidays (2026)</h3>
+              <ul style={styles.assumptionList}>
+                <li>New Year's Day (Jan 1), MLK Day (Jan 19), Presidents Day (Feb 16)</li>
+                <li>Memorial Day (May 25), Independence Day observed (Jul 3), Labor Day (Sep 7)</li>
+                <li>Columbus Day (Oct 12), Veterans Day (Nov 11), Thanksgiving (Nov 26), Christmas (Dec 25)</li>
+              </ul>
+            </div>
+          </div>
+        </main>
       )}
 
       {showForm && <ProspectForm prospect={editingProspect} onSave={handleSaveProspect} onCancel={() => { setShowForm(false); setEditingProspect(null); }} />}
@@ -1733,6 +1873,7 @@ const styles = {
   chartBarLabel: { fontSize: '10px', marginTop: '8px', color: '#666' },
   chartBarValue: { fontSize: '9px', color: '#999', marginTop: '2px' },
   targetLine: { position: 'absolute', left: 0, right: 0, height: '2px', backgroundColor: '#c00', zIndex: 10 },
+  targetLineLabel: { position: 'absolute', right: '100%', top: '-8px', marginRight: '4px', fontSize: '9px', color: '#c00', fontWeight: 600, whiteSpace: 'nowrap' },
   availableStaffLine: { position: 'absolute', left: 0, right: 0, height: '2px', backgroundColor: '#060', zIndex: 10 },
   projectionSummary: { display: 'flex', gap: '32px', padding: '24px', border: '1px solid #000' },
   projectionSummaryItem: { display: 'flex', flexDirection: 'column', gap: '4px' },
@@ -1850,5 +1991,13 @@ const styles = {
   threeMonthRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' },
   threeMonthLabel: { fontSize: '12px', color: '#666' },
   threeMonthValue: { fontSize: '14px', fontWeight: 500 },
-  threeMonthDivider: { height: '1px', backgroundColor: '#ddd', margin: '12px 0' }
+  threeMonthDivider: { height: '1px', backgroundColor: '#ddd', margin: '12px 0' },
+  // Small tab button for assumptions
+  masterTabSmall: { padding: '8px 12px', border: 'none', background: 'none', fontSize: '14px', fontWeight: 500, cursor: 'pointer', borderBottom: '2px solid transparent', color: '#666' },
+  // Assumptions page styles
+  assumptionsPage: { maxWidth: '800px', margin: '0 auto' },
+  assumptionsTitle: { fontSize: '24px', fontWeight: 700, marginBottom: '32px', textTransform: 'uppercase', letterSpacing: '0.05em' },
+  assumptionSection: { marginBottom: '32px', padding: '20px', border: '1px solid #ddd', backgroundColor: '#fafafa' },
+  assumptionSectionTitle: { fontSize: '14px', fontWeight: 700, marginTop: 0, marginBottom: '12px', textTransform: 'uppercase', letterSpacing: '0.05em' },
+  assumptionList: { margin: 0, paddingLeft: '20px', lineHeight: '1.8', fontSize: '14px' }
 };
