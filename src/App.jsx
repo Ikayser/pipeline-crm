@@ -949,21 +949,21 @@ export default function CRMDashboard() {
 
       {/* Import Modal */}
       {showImport && (
-        <div style={styles.sidebar} onClick={(e) => { if (e.target === e.currentTarget) { setShowImport(false); setImportPreview(null); }}}>
-          <div style={{...styles.sidebarContent, maxWidth: '700px'}}>
+        <div style={styles.overlay} onClick={() => { setShowImport(false); setImportPreview(null); }}>
+          <div style={{...styles.sidebar, maxWidth: '700px', width: '700px'}} onClick={e => e.stopPropagation()}>
             <div style={styles.sidebarHeader}>
               <h2 style={styles.sidebarTitle}>Import Financial Model</h2>
               <button onClick={() => { setShowImport(false); setImportPreview(null); }} style={styles.closeButton}>×</button>
             </div>
-            <div style={styles.sidebarBody}>
+            <div style={{...styles.sidebarContent, overflow: 'auto'}}>
               {!importPreview ? (
-                <div style={{padding: '40px', textAlign: 'center', border: '2px dashed #ccc', cursor: 'pointer'}} onClick={() => document.getElementById('csv-upload').click()}>
+                <div style={{padding: '40px', textAlign: 'center', border: '2px dashed #ccc', cursor: 'pointer', margin: '20px'}} onClick={() => document.getElementById('csv-upload').click()}>
                   <input id="csv-upload" type="file" accept=".csv" style={{display: 'none'}} onChange={(e) => { if (e.target.files[0]) handleImportCSV(e.target.files[0]); }} />
                   <p style={{fontSize: '16px', fontWeight: 600, marginBottom: '8px'}}>Drop CSV or click to upload</p>
                   <p style={{fontSize: '13px', color: '#666'}}>Export your financial model as CSV (Committed Detail tab)</p>
                 </div>
               ) : (
-                <>
+                <div style={{padding: '20px'}}>
                   <p style={{fontSize: '14px', marginBottom: '16px'}}>Found <strong>{importPreview.length} projects</strong> to import:</p>
                   <table style={styles.table}>
                     <thead>
@@ -1002,7 +1002,7 @@ export default function CRMDashboard() {
                       {syncing ? 'Importing...' : `Import ${importPreview.length} Projects`}
                     </button>
                   </div>
-                </>
+                </div>
               )}
             </div>
           </div>
