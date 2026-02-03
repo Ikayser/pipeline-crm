@@ -137,6 +137,8 @@ export default function CRMDashboard() {
   const [showEngagementForm, setShowEngagementForm] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [showWeighted, setShowWeighted] = useState(true);
+  const [showImport, setShowImport] = useState(false);
+  const [importPreview, setImportPreview] = useState(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -440,6 +442,159 @@ export default function CRMDashboard() {
     const csv = [headers, ...rows].map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'projects.csv'; a.click();
+  };
+
+  // CSV Import from Financial Model
+  const parseFinancialModelCSV = (csvText) => {
+    // Parse CSV handling quoted fields with commas
+    const parseCSVLine = (line) => {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        if (line[i] === '"') { inQuotes = !inQuotes; }
+        else if (line[i] === ',' && !inQuotes) { result.push(current); current = ''; }
+        else { current += line[i]; }
+      }
+      result.push(current);
+      return result;
+    };
+
+    const lines = csvText.replace(/\r/g, '').split('\n');
+    const rows = lines.map(l => parseCSVLine(l));
+    
+    // Find the header row (has "Job Number", "Client", "Project Name", "SOW")
+    let headerIdx = -1;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i][0] && rows[i][0].trim() === 'Job Number') { headerIdx = i; break; }
+    }
+    if (headerIdx === -1) return { error: 'Could not find header row with "Job Number". Check CSV format.' };
+
+    // Month column mapping - find columns for 2026 months
+    const header = rows[headerIdx];
+    const monthMap = {};
+    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const monthAliases = { 'April': 'Apr', 'June': 'Jun', 'July': 'Jul' };
+    
+    header.forEach((h, idx) => {
+      if (!h) return;
+      const clean = h.trim();
+      // Match patterns like "Jan 26", "Feb 26", "April 26", "Aug 2026", etc.
+      for (const mName of monthNames) {
+        if (clean.startsWith(mName) && (clean.includes('26') || clean.includes('2026'))) {
+          monthMap[mName] = idx;
+          return;
+        }
+      }
+      // Check aliases
+      for (const [alias, mName] of Object.entries(monthAliases)) {
+        if (clean.startsWith(alias) && (clean.includes('26') || clean.includes('2026'))) {
+          monthMap[mName] = idx;
+          return;
+        }
+      }
+    });
+
+    // Parse project rows (rows after header until blank/TOTAL)
+    const imported = [];
+    for (let i = headerIdx + 1; i < rows.length; i++) {
+      const row = rows[i];
+      const client = (row[1] || '').trim();
+      const projectName = (row[2] || '').trim();
+      const sowRaw = (row[3] || '').trim();
+      
+      // Stop at empty rows or TOTAL
+      if (!client || client === 'TOTAL') break;
+      
+      // Parse SOW value
+      const sow = parseFloat(sowRaw.replace(/[$,]/g, '')) || 0;
+      
+      // Parse monthly revenue for 2026
+      const monthlyRevenue = {};
+      let totalRev2026 = 0;
+      for (const [month, col] of Object.entries(monthMap)) {
+        const val = (row[col] || '').replace(/[$,]/g, '').trim();
+        const num = parseFloat(val) || 0;
+        if (num > 0) {
+          monthlyRevenue[month] = num;
+          totalRev2026 += num;
+        }
+      }
+      
+      if (totalRev2026 === 0) continue;
+      
+      // Determine start/end months and duration
+      const activeMonths = monthNames.filter(m => monthlyRevenue[m]);
+      const startMonth = activeMonths[0];
+      const endMonth = activeMonths[activeMonths.length - 1];
+      const startIdx = monthNames.indexOf(startMonth);
+      const endIdx = monthNames.indexOf(endMonth);
+      const numMonths = endIdx - startIdx + 1;
+      const durationWeeks = Math.round(numMonths * 4.33);
+      
+      // Start date = first day of start month 2026
+      const startDate = `2026-${String(startIdx + 1).padStart(2, '0')}-01`;
+      
+      imported.push({
+        company: client,
+        project_name: projectName,
+        sow_value: sow,
+        contract_value: totalRev2026,
+        start_date: startDate,
+        duration: durationWeeks,
+        start_month: startMonth,
+        end_month: endMonth,
+        monthly_detail: monthlyRevenue,
+        status: 'Active'
+      });
+    }
+    
+    return { projects: imported };
+  };
+
+  const handleImportCSV = async (file) => {
+    const text = await file.text();
+    const result = parseFinancialModelCSV(text);
+    if (result.error) {
+      alert(result.error);
+      return;
+    }
+    setImportPreview(result.projects);
+  };
+
+  const handleConfirmImport = async () => {
+    if (!importPreview) return;
+    setSyncing(true);
+    
+    for (const proj of importPreview) {
+      // Check if project already exists (match on company + project name)
+      const existing = projects.find(p => 
+        p.company.toLowerCase() === proj.company.toLowerCase() && 
+        p.project_name && proj.project_name && 
+        p.project_name.toLowerCase() === proj.project_name.toLowerCase()
+      );
+      
+      const data = {
+        company: proj.company,
+        project_name: proj.project_name,
+        contract_value: proj.contract_value,
+        start_date: proj.start_date,
+        duration: proj.duration,
+        status: proj.status,
+        user_id: session.user.id
+      };
+      
+      if (existing) {
+        await supabase.from('projects').update(data).eq('id', existing.id);
+      } else {
+        await supabase.from('projects').insert(data);
+      }
+    }
+    
+    await loadProjects();
+    setImportPreview(null);
+    setShowImport(false);
+    setSyncing(false);
   };
 
   if (loading) return <div style={styles.authContainer}><div style={styles.authBox}><h1 style={styles.logo}>Pipeline</h1><p style={styles.authText}>Loading...</p></div></div>;
@@ -780,7 +935,78 @@ export default function CRMDashboard() {
 
       {/* SETTINGS TAB */}
       {masterTab === 'settings' && (
-        <SettingsPanel settings={settings} onSave={saveSettings} formatCurrency={formatCurrency} />
+        <>
+          <SettingsPanel settings={settings} onSave={saveSettings} formatCurrency={formatCurrency} />
+          <main style={styles.main}>
+            <div style={{...styles.projectionsView, marginTop: '0'}}>
+              <h2 style={styles.projectionTitle}>Import Financial Model</h2>
+              <p style={{fontSize: '14px', color: '#666', marginBottom: '16px'}}>Upload a CSV export from the financial model to sync committed projects. Matches on Company + Project Name to avoid duplicates.</p>
+              <button onClick={() => setShowImport(true)} style={styles.actionButtonPrimary}>Import from CSV</button>
+            </div>
+          </main>
+        </>
+      )}
+
+      {/* Import Modal */}
+      {showImport && (
+        <div style={styles.sidebar} onClick={(e) => { if (e.target === e.currentTarget) { setShowImport(false); setImportPreview(null); }}}>
+          <div style={{...styles.sidebarContent, maxWidth: '700px'}}>
+            <div style={styles.sidebarHeader}>
+              <h2 style={styles.sidebarTitle}>Import Financial Model</h2>
+              <button onClick={() => { setShowImport(false); setImportPreview(null); }} style={styles.closeButton}>×</button>
+            </div>
+            <div style={styles.sidebarBody}>
+              {!importPreview ? (
+                <div style={{padding: '40px', textAlign: 'center', border: '2px dashed #ccc', cursor: 'pointer'}} onClick={() => document.getElementById('csv-upload').click()}>
+                  <input id="csv-upload" type="file" accept=".csv" style={{display: 'none'}} onChange={(e) => { if (e.target.files[0]) handleImportCSV(e.target.files[0]); }} />
+                  <p style={{fontSize: '16px', fontWeight: 600, marginBottom: '8px'}}>Drop CSV or click to upload</p>
+                  <p style={{fontSize: '13px', color: '#666'}}>Export your financial model as CSV (Committed Detail tab)</p>
+                </div>
+              ) : (
+                <>
+                  <p style={{fontSize: '14px', marginBottom: '16px'}}>Found <strong>{importPreview.length} projects</strong> to import:</p>
+                  <table style={styles.table}>
+                    <thead>
+                      <tr>
+                        <th style={styles.th}>Company</th>
+                        <th style={styles.th}>Project</th>
+                        <th style={styles.th}>2026 Revenue</th>
+                        <th style={styles.th}>Duration</th>
+                        <th style={styles.th}>Start</th>
+                        <th style={styles.th}>Match</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {importPreview.map((proj, i) => {
+                        const existing = projects.find(p => 
+                          p.company.toLowerCase() === proj.company.toLowerCase() && 
+                          p.project_name && proj.project_name && 
+                          p.project_name.toLowerCase() === proj.project_name.toLowerCase()
+                        );
+                        return (
+                          <tr key={i} style={styles.tr}>
+                            <td style={styles.td}>{proj.company}</td>
+                            <td style={styles.td}>{proj.project_name}</td>
+                            <td style={{...styles.td, textAlign: 'right'}}>{formatCurrency(proj.contract_value)}</td>
+                            <td style={{...styles.td, textAlign: 'center'}}>{proj.duration}wk</td>
+                            <td style={{...styles.td, textAlign: 'center'}}>{proj.start_month} '26</td>
+                            <td style={{...styles.td, textAlign: 'center', color: existing ? '#c90' : '#060'}}>{existing ? 'Update' : 'New'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  <div style={{display: 'flex', gap: '12px', marginTop: '24px', justifyContent: 'flex-end'}}>
+                    <button onClick={() => setImportPreview(null)} style={styles.actionButton}>Back</button>
+                    <button onClick={handleConfirmImport} style={styles.actionButtonPrimary}>
+                      {syncing ? 'Importing...' : `Import ${importPreview.length} Projects`}
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       {/* MASTER INSIGHTS TAB */}
