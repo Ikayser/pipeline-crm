@@ -2168,7 +2168,8 @@ function AuthScreen() {
     e.preventDefault(); setError(''); setMessage(''); setLoading(true);
     if (isSignUp) {
       const { error } = await supabase.auth.signUp({ email, password });
-      if (error) setError(error.message); else setMessage('Check your email for the confirmation link.');
+      if (error) setError(error.message);
+      // No confirmation needed - user will be logged in automatically
     } else {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) setError(error.message);
