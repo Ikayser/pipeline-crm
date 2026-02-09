@@ -1033,6 +1033,7 @@ export default function CRMDashboard() {
               ))}
             </div>
             <div style={styles.navActions}>
+              <button onClick={() => setShowImport(true)} style={styles.actionButton}>Import</button>
               <button onClick={handleExportProjectsCSV} style={styles.actionButton}>Export</button>
               <button onClick={() => { setEditingProject(null); setShowProjectForm(true); }} style={styles.actionButtonPrimary}>+ New Project</button>
             </div>
@@ -1121,16 +1122,7 @@ export default function CRMDashboard() {
 
       {/* SETTINGS TAB */}
       {masterTab === 'settings' && (
-        <>
-          <SettingsPanel settings={settings} onSave={saveSettings} formatCurrency={formatCurrency} />
-          <main style={styles.main}>
-            <div style={{...styles.projectionsView, marginTop: '0'}}>
-              <h2 style={styles.projectionTitle}>Import Financial Model</h2>
-              <p style={{fontSize: '14px', color: '#666', marginBottom: '16px'}}>Upload a CSV export from the financial model to sync committed projects. Matches on Company + Project Name to avoid duplicates.</p>
-              <button onClick={() => setShowImport(true)} style={styles.actionButtonPrimary}>Import from CSV</button>
-            </div>
-          </main>
-        </>
+        <SettingsPanel settings={settings} onSave={saveSettings} formatCurrency={formatCurrency} />
       )}
 
       {/* Import Modal */}
