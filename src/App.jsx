@@ -599,7 +599,7 @@ export default function CRMDashboard() {
     setSyncing(false);
   };
 
-  // Prospect CSV Import
+  // Prospect CSV Import - handles financial model weighted detail format
   const parseProspectCSV = (csvText) => {
     const parseCSVLine = (line) => {
       const result = [];
@@ -614,55 +614,116 @@ export default function CRMDashboard() {
       return result;
     };
 
-    const lines = csvText.replace(/\r/g, '').split('\n').filter(l => l.trim());
-    if (lines.length < 2) return { error: 'CSV must have header row and at least one data row.' };
+    const lines = csvText.replace(/\r/g, '').split('\n');
+    const rows = lines.map(l => parseCSVLine(l));
     
-    const header = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+    // Find the header row - look for "Client" in first column
+    let headerIdx = -1;
+    for (let i = 0; i < rows.length; i++) {
+      const firstCell = (rows[i][0] || '').toLowerCase().trim();
+      if (firstCell === 'client') {
+        headerIdx = i;
+        break;
+      }
+    }
     
-    // Map common column names
+    if (headerIdx === -1) return { error: 'Could not find header row with "Client". Check CSV format.' };
+    
+    const header = rows[headerIdx].map(h => (h || '').toLowerCase().replace(/[^a-z0-9%]/g, ''));
+    
+    // Map columns for financial model format
     const colMap = {};
     header.forEach((h, i) => {
-      if (h.includes('company') || h.includes('client')) colMap.company = i;
-      if (h.includes('project') || h.includes('name')) colMap.project_name = i;
-      if (h.includes('contact')) colMap.contact = i;
-      if (h.includes('budget') || h.includes('value') || h.includes('amount')) colMap.budget = i;
-      if (h.includes('probability') || h.includes('prob') || h.includes('likelihood')) colMap.probability = i;
-      if (h.includes('stage') || h.includes('status')) colMap.stage = i;
-      if (h.includes('start') && h.includes('date')) colMap.start_date = i;
-      if (h.includes('duration') || h.includes('weeks')) colMap.duration = i;
-      if (h.includes('type') || h.includes('worktype')) colMap.work_type = i;
-      if (h.includes('source') || h.includes('lead')) colMap.lead_source = i;
+      if (h === 'client') colMap.company = i;
+      if (h.includes('project') && h.includes('name')) colMap.project_name = i;
+      if (h.includes('sow') || h === 'nysow') colMap.budget = i;
+      if (h.includes('probable') || h === 'probable') colMap.probability = i;
+      if (h === 'weeks') colMap.duration = i;
+      if (h.includes('kick') || h.includes('off') || h.includes('start')) colMap.start_date = i;
     });
     
-    if (colMap.company === undefined) return { error: 'Could not find Company/Client column.' };
+    // If no project_name found, try column 1
+    if (colMap.project_name === undefined && colMap.company === 0) {
+      colMap.project_name = 1;
+    }
+    
+    // If no budget found, try column 2 (NY SOW position)
+    if (colMap.budget === undefined) {
+      colMap.budget = 2;
+    }
+    
+    // If no probability found, try column 4 (% Probable position)
+    if (colMap.probability === undefined) {
+      colMap.probability = 4;
+    }
+    
+    // If no duration found, try column 5 (Weeks position)
+    if (colMap.duration === undefined) {
+      colMap.duration = 5;
+    }
+    
+    // If no start_date found, try column 7 (Kick Off position)
+    if (colMap.start_date === undefined) {
+      colMap.start_date = 7;
+    }
     
     const imported = [];
-    for (let i = 1; i < lines.length; i++) {
-      const row = parseCSVLine(lines[i]);
-      const company = row[colMap.company];
-      if (!company) continue;
+    for (let i = headerIdx + 1; i < rows.length; i++) {
+      const row = rows[i];
+      const company = (row[colMap.company] || '').trim();
       
-      const budgetRaw = colMap.budget !== undefined ? row[colMap.budget] : '';
+      // Skip empty rows, TOTAL rows, and section headers
+      if (!company || company.toUpperCase() === 'TOTAL' || company.toUpperCase() === 'LEADS') break;
+      
+      const projectName = colMap.project_name !== undefined ? (row[colMap.project_name] || '').trim() : '';
+      
+      // Skip if no project name (likely a section divider)
+      if (!projectName) continue;
+      
+      const budgetRaw = colMap.budget !== undefined ? (row[colMap.budget] || '') : '';
       const budget = parseFloat(budgetRaw.replace(/[$,]/g, '')) || 0;
       
-      const probRaw = colMap.probability !== undefined ? row[colMap.probability] : '';
+      // Skip if no budget
+      if (budget === 0) continue;
+      
+      const probRaw = colMap.probability !== undefined ? (row[colMap.probability] || '') : '';
       const probability = parseInt(probRaw.replace('%', '')) || 50;
       
-      const durationRaw = colMap.duration !== undefined ? row[colMap.duration] : '';
+      const durationRaw = colMap.duration !== undefined ? (row[colMap.duration] || '') : '';
       const duration = parseInt(durationRaw) || 12;
+      
+      // Parse start date - could be "Feb 17", "March", "Feb 2", etc.
+      let startDateRaw = colMap.start_date !== undefined ? (row[colMap.start_date] || '').trim() : '';
+      let startDate = '';
+      if (startDateRaw) {
+        // Parse month names and convert to 2026 date
+        const monthMap = { 'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04', 'may': '05', 'jun': '06', 
+                          'jul': '07', 'aug': '08', 'sep': '09', 'oct': '10', 'nov': '11', 'dec': '12' };
+        const monthMatch = startDateRaw.toLowerCase().match(/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/);
+        if (monthMatch) {
+          const month = monthMap[monthMatch[1]];
+          const dayMatch = startDateRaw.match(/\d+/);
+          const day = dayMatch ? dayMatch[0].padStart(2, '0') : '01';
+          startDate = `2026-${month}-${day}`;
+        }
+      }
       
       imported.push({
         company,
-        project_name: colMap.project_name !== undefined ? row[colMap.project_name] : '',
-        contact: colMap.contact !== undefined ? row[colMap.contact] : '',
+        project_name: projectName,
+        contact: '',
         budget,
         probability,
         duration,
-        stage: colMap.stage !== undefined ? row[colMap.stage] : 'Lead',
-        start_date: colMap.start_date !== undefined ? row[colMap.start_date] : '',
-        work_type: colMap.work_type !== undefined ? row[colMap.work_type] : '',
-        lead_source: colMap.lead_source !== undefined ? row[colMap.lead_source] : 'new'
+        stage: 'Proposal',
+        start_date: startDate,
+        work_type: '',
+        lead_source: 'new'
       });
+    }
+    
+    if (imported.length === 0) {
+      return { error: 'No valid prospects found. Check that your CSV has Client, Project Name, SOW, % Probable, Weeks, and Kick Off columns.' };
     }
     
     return { prospects: imported };
