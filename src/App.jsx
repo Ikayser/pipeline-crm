@@ -672,8 +672,11 @@ export default function CRMDashboard() {
       const row = rows[i];
       const company = (row[colMap.company] || '').trim();
       
-      // Skip empty rows, TOTAL rows, and section headers
-      if (!company || company.toUpperCase() === 'TOTAL' || company.toUpperCase() === 'LEADS') break;
+      // Skip empty rows
+      if (!company) continue;
+      
+      // Stop at TOTAL or LEADS section headers
+      if (company.toUpperCase() === 'TOTAL' || company.toUpperCase() === 'LEADS') break;
       
       const projectName = colMap.project_name !== undefined ? (row[colMap.project_name] || '').trim() : '';
       
