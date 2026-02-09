@@ -139,6 +139,8 @@ export default function CRMDashboard() {
   const [showWeighted, setShowWeighted] = useState(true);
   const [showImport, setShowImport] = useState(false);
   const [importPreview, setImportPreview] = useState(null);
+  const [showProspectImport, setShowProspectImport] = useState(false);
+  const [prospectImportPreview, setProspectImportPreview] = useState(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -597,12 +599,134 @@ export default function CRMDashboard() {
     setSyncing(false);
   };
 
+  // Prospect CSV Import
+  const parseProspectCSV = (csvText) => {
+    const parseCSVLine = (line) => {
+      const result = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        if (line[i] === '"') { inQuotes = !inQuotes; }
+        else if (line[i] === ',' && !inQuotes) { result.push(current.trim()); current = ''; }
+        else { current += line[i]; }
+      }
+      result.push(current.trim());
+      return result;
+    };
+
+    const lines = csvText.replace(/\r/g, '').split('\n').filter(l => l.trim());
+    if (lines.length < 2) return { error: 'CSV must have header row and at least one data row.' };
+    
+    const header = parseCSVLine(lines[0]).map(h => h.toLowerCase().replace(/[^a-z0-9]/g, ''));
+    
+    // Map common column names
+    const colMap = {};
+    header.forEach((h, i) => {
+      if (h.includes('company') || h.includes('client')) colMap.company = i;
+      if (h.includes('project') || h.includes('name')) colMap.project_name = i;
+      if (h.includes('contact')) colMap.contact = i;
+      if (h.includes('budget') || h.includes('value') || h.includes('amount')) colMap.budget = i;
+      if (h.includes('probability') || h.includes('prob') || h.includes('likelihood')) colMap.probability = i;
+      if (h.includes('stage') || h.includes('status')) colMap.stage = i;
+      if (h.includes('start') && h.includes('date')) colMap.start_date = i;
+      if (h.includes('duration') || h.includes('weeks')) colMap.duration = i;
+      if (h.includes('type') || h.includes('worktype')) colMap.work_type = i;
+      if (h.includes('source') || h.includes('lead')) colMap.lead_source = i;
+    });
+    
+    if (colMap.company === undefined) return { error: 'Could not find Company/Client column.' };
+    
+    const imported = [];
+    for (let i = 1; i < lines.length; i++) {
+      const row = parseCSVLine(lines[i]);
+      const company = row[colMap.company];
+      if (!company) continue;
+      
+      const budgetRaw = colMap.budget !== undefined ? row[colMap.budget] : '';
+      const budget = parseFloat(budgetRaw.replace(/[$,]/g, '')) || 0;
+      
+      const probRaw = colMap.probability !== undefined ? row[colMap.probability] : '';
+      const probability = parseInt(probRaw.replace('%', '')) || 50;
+      
+      const durationRaw = colMap.duration !== undefined ? row[colMap.duration] : '';
+      const duration = parseInt(durationRaw) || 12;
+      
+      imported.push({
+        company,
+        project_name: colMap.project_name !== undefined ? row[colMap.project_name] : '',
+        contact: colMap.contact !== undefined ? row[colMap.contact] : '',
+        budget,
+        probability,
+        duration,
+        stage: colMap.stage !== undefined ? row[colMap.stage] : 'Lead',
+        start_date: colMap.start_date !== undefined ? row[colMap.start_date] : '',
+        work_type: colMap.work_type !== undefined ? row[colMap.work_type] : '',
+        lead_source: colMap.lead_source !== undefined ? row[colMap.lead_source] : 'new'
+      });
+    }
+    
+    return { prospects: imported };
+  };
+
+  const handleProspectImportCSV = async (file) => {
+    const text = await file.text();
+    const result = parseProspectCSV(text);
+    if (result.error) {
+      alert(result.error);
+      return;
+    }
+    setProspectImportPreview(result.prospects);
+  };
+
+  const handleConfirmProspectImport = async () => {
+    if (!prospectImportPreview) return;
+    setSyncing(true);
+    
+    for (const p of prospectImportPreview) {
+      const existing = prospects.find(ex => 
+        ex.company.toLowerCase() === p.company.toLowerCase() && 
+        ex.project_name && p.project_name && 
+        ex.project_name.toLowerCase() === p.project_name.toLowerCase()
+      );
+      
+      const data = {
+        company: p.company,
+        project_name: p.project_name,
+        contact: p.contact,
+        budget: p.budget,
+        probability: p.probability,
+        duration: p.duration,
+        stage: p.stage || 'Lead',
+        start_date: p.start_date || null,
+        work_type: p.work_type,
+        lead_source: p.lead_source,
+        last_engagement: new Date().toISOString().split('T')[0],
+        user_id: session.user.id
+      };
+      
+      if (existing) {
+        await supabase.from('prospects').update(data).eq('id', existing.id);
+      } else {
+        await supabase.from('prospects').insert(data);
+      }
+    }
+    
+    await loadProspects();
+    setProspectImportPreview(null);
+    setShowProspectImport(false);
+    setSyncing(false);
+  };
+
   if (loading) return <div style={styles.authContainer}><div style={styles.authBox}><h1 style={styles.logo}>Pipeline</h1><p style={styles.authText}>Loading...</p></div></div>;
   if (!session) return <AuthScreen />;
 
   const projectionData = getProjectionData();
   const maxRevenue = Math.max(...projectionData.map(m => m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : m.pipelineRevenue)), ...projectionData.map(m => m.target), 1);
   const maxFTE = Math.max(...projectionData.map(m => Math.max(m.availableStaff, m.committedFTE + (showWeighted ? m.pipelineFTEWeighted : m.pipelineFTE))), 1);
+
+  // Sorted lists (alphabetically by company)
+  const sortedProspects = [...prospects].sort((a, b) => (a.company || '').localeCompare(b.company || ''));
+  const sortedProjects = [...projects].sort((a, b) => (a.company || '').localeCompare(b.company || ''));
 
   return (
     <div style={styles.container}>
@@ -637,6 +761,7 @@ export default function CRMDashboard() {
               ))}
             </div>
             <div style={styles.navActions}>
+              <button onClick={() => setShowProspectImport(true)} style={styles.actionButton}>Import</button>
               <button onClick={handleExportCSV} style={styles.actionButton}>Export</button>
               <button onClick={() => { setEditingProspect(null); setShowForm(true); }} style={styles.actionButtonPrimary}>+ New Prospect</button>
             </div>
@@ -660,7 +785,7 @@ export default function CRMDashboard() {
                     <div style={styles.pipelineHeader}><span style={styles.stageName}>{stage}</span><span style={styles.stageCount}>{count}</span></div>
                     <div style={styles.stageValue}>{formatCurrency(value)}</div>
                     <div style={styles.pipelineCards}>
-                      {prospects.filter(p => p.stage === stage).map(prospect => (
+                      {sortedProspects.filter(p => p.stage === stage).map(prospect => (
                         <div key={prospect.id} style={{...styles.prospectCard, ...(daysSince(prospect.last_engagement) > 7 ? styles.prospectCardStale : {})}} onClick={() => setSelectedProspect(prospect)}>
                           <div style={styles.cardCompany}>{prospect.project_name || prospect.company}</div>
                           {prospect.project_name && <div style={styles.cardContact}>{prospect.company}</div>}
@@ -685,7 +810,7 @@ export default function CRMDashboard() {
                     <th style={styles.th}>Duration</th><th style={styles.th}>Prob.</th><th style={styles.th}>Start</th><th style={styles.th}>FTEs</th><th style={styles.th}>Stage</th><th style={styles.th}>Last Contact</th>
                   </tr></thead>
                   <tbody>
-                    {prospects.map(prospect => {
+                    {sortedProspects.map(prospect => {
                       const autoFTE = calculateFTE(prospect.budget, prospect.duration);
                       const displayFTE = prospect.staffing_fte != null ? prospect.staffing_fte : autoFTE;
                       return (
@@ -710,7 +835,7 @@ export default function CRMDashboard() {
 
             {view === 'monthly' && (
               <MonthlyEditableTable 
-                items={prospects.filter(p => p.stage !== 'Closed')} 
+                items={sortedProspects.filter(p => p.stage !== 'Closed')} 
                 type="prospect"
                 months={MONTHS}
                 formatCurrency={formatCurrency}
@@ -726,23 +851,20 @@ export default function CRMDashboard() {
             {view === 'projections' && (
               <div style={styles.projectionsView}>
                 <div style={styles.projectionHeader}>
-                  <h2 style={styles.projectionTitle}>Pipeline Revenue Projections</h2>
-                  <div style={styles.projectionToggle}>
-                    <button onClick={() => setShowWeighted(false)} style={{...styles.toggleButton, ...(!showWeighted ? styles.toggleButtonActive : {})}}>Estimated</button>
-                    <button onClick={() => setShowWeighted(true)} style={{...styles.toggleButton, ...(showWeighted ? styles.toggleButtonActive : {})}}>Weighted</button>
-                  </div>
+                  <h2 style={styles.projectionTitle}>Weighted Pipeline Revenue</h2>
                 </div>
                 <div style={styles.chartContainer}>
                   <div style={styles.chartYAxis}><span>{formatCurrency(maxRevenue)}</span><span>{formatCurrency(maxRevenue / 2)}</span><span>$0</span></div>
                   <div style={styles.chart}>
                     {projectionData.map((month, idx) => {
-                      const pipeline = showWeighted ? month.pipelineRevenueWeighted : month.pipelineRevenue;
+                      const pipeline = month.pipelineRevenueWeighted;
                       return (
                         <div key={idx} style={styles.chartBar}>
                           <div style={styles.chartBarStack}>
                             <div style={{...styles.chartBarSegment, height: `${maxRevenue ? (pipeline / maxRevenue) * 100 : 0}%`, backgroundColor: '#999'}} />
                           </div>
                           <div style={styles.chartBarLabel}>{month.label}</div>
+                          {pipeline > 0 && <div style={styles.chartBarValue}>{formatCurrency(pipeline)}</div>}
                         </div>
                       );
                     })}
@@ -869,7 +991,7 @@ export default function CRMDashboard() {
                     <th style={styles.th}>Contract Value</th><th style={styles.th}>Duration</th><th style={styles.th}>Start</th><th style={styles.th}>FTEs</th><th style={styles.th}>Status</th>
                   </tr></thead>
                   <tbody>
-                    {projects.map(project => {
+                    {sortedProjects.map(project => {
                       const autoFTE = calculateFTE(project.contract_value, project.duration);
                       const displayFTE = project.staffing_fte != null ? project.staffing_fte : autoFTE;
                       return (
@@ -892,7 +1014,7 @@ export default function CRMDashboard() {
 
             {projectView === 'monthly' && (
               <MonthlyEditableTable 
-                items={projects.filter(p => p.status === 'Active')} 
+                items={sortedProjects.filter(p => p.status === 'Active')} 
                 type="project"
                 months={MONTHS}
                 formatCurrency={formatCurrency}
@@ -1009,6 +1131,68 @@ export default function CRMDashboard() {
         </div>
       )}
 
+      {/* Prospect Import Modal */}
+      {showProspectImport && (
+        <div style={styles.overlay} onClick={() => { setShowProspectImport(false); setProspectImportPreview(null); }}>
+          <div style={{...styles.sidebar, maxWidth: '700px', width: '700px'}} onClick={e => e.stopPropagation()}>
+            <div style={styles.sidebarHeader}>
+              <h2 style={styles.sidebarTitle}>Import Prospects</h2>
+              <button onClick={() => { setShowProspectImport(false); setProspectImportPreview(null); }} style={styles.closeButton}>×</button>
+            </div>
+            <div style={{...styles.sidebarContent, overflow: 'auto'}}>
+              {!prospectImportPreview ? (
+                <div style={{padding: '40px', textAlign: 'center', border: '2px dashed #ccc', cursor: 'pointer', margin: '20px'}} onClick={() => document.getElementById('prospect-csv-upload').click()}>
+                  <input id="prospect-csv-upload" type="file" accept=".csv" style={{display: 'none'}} onChange={(e) => { if (e.target.files[0]) handleProspectImportCSV(e.target.files[0]); }} />
+                  <p style={{fontSize: '16px', fontWeight: 600, marginBottom: '8px'}}>Drop CSV or click to upload</p>
+                  <p style={{fontSize: '13px', color: '#666'}}>CSV should have columns: Company, Project, Budget, Probability, Duration, Stage</p>
+                </div>
+              ) : (
+                <div style={{padding: '20px'}}>
+                  <p style={{fontSize: '14px', marginBottom: '16px'}}>Found <strong>{prospectImportPreview.length} prospects</strong> to import:</p>
+                  <table style={styles.table}>
+                    <thead>
+                      <tr>
+                        <th style={styles.th}>Company</th>
+                        <th style={styles.th}>Project</th>
+                        <th style={styles.th}>Budget</th>
+                        <th style={styles.th}>Prob.</th>
+                        <th style={styles.th}>Stage</th>
+                        <th style={styles.th}>Match</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {prospectImportPreview.map((p, i) => {
+                        const existing = prospects.find(ex => 
+                          ex.company.toLowerCase() === p.company.toLowerCase() && 
+                          ex.project_name && p.project_name && 
+                          ex.project_name.toLowerCase() === p.project_name.toLowerCase()
+                        );
+                        return (
+                          <tr key={i} style={styles.tr}>
+                            <td style={styles.td}>{p.company}</td>
+                            <td style={styles.td}>{p.project_name || '—'}</td>
+                            <td style={{...styles.td, textAlign: 'right'}}>{formatCurrency(p.budget)}</td>
+                            <td style={{...styles.td, textAlign: 'center'}}>{p.probability}%</td>
+                            <td style={styles.td}>{p.stage}</td>
+                            <td style={{...styles.td, textAlign: 'center', color: existing ? '#c90' : '#060'}}>{existing ? 'Update' : 'New'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  <div style={{display: 'flex', gap: '12px', marginTop: '24px', justifyContent: 'flex-end'}}>
+                    <button onClick={() => setProspectImportPreview(null)} style={styles.actionButton}>Back</button>
+                    <button onClick={handleConfirmProspectImport} style={styles.actionButtonPrimary}>
+                      {syncing ? 'Importing...' : `Import ${prospectImportPreview.length} Prospects`}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* MASTER INSIGHTS TAB */}
       {masterTab === 'ops-dashboard' && (
         <>
@@ -1029,6 +1213,7 @@ export default function CRMDashboard() {
             {(() => {
               const WEEKLY_RUN_RATE = 25000;
               const DEFAULT_PROJECT_WEEKS = 12;
+              const MAX_NEW_PROJECTS_PER_2_WEEKS = 2; // Capacity constraint
               const currentMonth = projectionData[0];
               const next3Months = projectionData.slice(0, 3);
               const following3Months = projectionData.slice(3, 6);
@@ -1037,29 +1222,29 @@ export default function CRMDashboard() {
               const currentMonthCommittedGap = currentMonth.target - currentMonth.committedRevenue;
               
               // Helper function to calculate gap analysis for a 3-month period
-              // Projects needed is calculated per-month to ensure EVERY month meets target
+              // Uses WEIGHTED pipeline values (not just 90%+)
               const calculateGapAnalysis = (months, periodLabel) => {
-                // Calculate likely revenue per month (committed + 90%+ prospects)
+                // Calculate revenue per month (committed + weighted pipeline)
                 const monthlyData = months.map(m => {
-                  const likelyPipeline = prospects
-                    .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
+                  // Weighted pipeline (all prospects weighted by probability)
+                  const weightedPipeline = prospects
+                    .filter(p => p.stage !== 'Closed')
                     .reduce((pSum, p) => {
                       if (!p.start_date || !p.budget) return pSum;
+                      const prob = (p.probability || 50) / 100;
                       const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
-                      return pSum + (monthlyRevenue[m.key] || 0);
+                      return pSum + (monthlyRevenue[m.key] || 0) * prob;
                     }, 0);
-                  const likelyRevenue = m.committedRevenue + likelyPipeline;
-                  const gap = m.target - likelyRevenue;
-                  return { month: m, likelyRevenue, gap };
+                  const totalRevenue = m.committedRevenue + weightedPipeline;
+                  const gap = m.target - totalRevenue;
+                  return { month: m, totalRevenue, weightedPipeline, gap };
                 });
                 
-                const totalLikelyRevenue = monthlyData.reduce((sum, d) => sum + d.likelyRevenue, 0);
+                const totalRevenue = monthlyData.reduce((sum, d) => sum + d.totalRevenue, 0);
                 const totalTarget = months.reduce((sum, m) => sum + m.target, 0);
-                const totalGap = totalTarget - totalLikelyRevenue;
+                const totalGap = totalTarget - totalRevenue;
                 
-                // Calculate projects/weeks needed to fill EACH month's gap
-                // A $25K/week project running 12 weeks = $300K total
-                // Revenue per week = $25K, so gap / $25K = weeks needed
+                // Calculate weeks needed to fill EACH month's gap
                 let totalWeeksNeeded = 0;
                 const monthGapDetails = monthlyData.map(d => {
                   const weeksNeeded = d.gap > 0 ? Math.ceil(d.gap / WEEKLY_RUN_RATE) : 0;
@@ -1070,31 +1255,50 @@ export default function CRMDashboard() {
                 // Convert total weeks to projects (12 weeks each)
                 const projectsNeeded = totalWeeksNeeded > 0 ? Math.ceil(totalWeeksNeeded / DEFAULT_PROJECT_WEEKS) : 0;
                 
+                // Capacity constraint: 2 new projects per 2 weeks = 1 per week
+                // 3 months = ~13 weeks, so max ~13 new project starts, but constrained to 2 per 2 weeks = ~6 projects
+                const weeksInPeriod = 13; // ~3 months
+                const maxProjectsCanStart = Math.floor(weeksInPeriod / 2) * MAX_NEW_PROJECTS_PER_2_WEEKS;
+                const capacityConstrained = projectsNeeded > maxProjectsCanStart;
+                
                 // Calculate required start date to fill gap
                 const periodStart = months[0]?.date;
                 const requiredStartDate = periodStart ? new Date(periodStart) : null;
                 
-                // Staffing gaps
+                // Staffing gaps (using weighted FTE)
                 const staffingGaps = months.map(m => {
-                  const likelyPipelineFTE = prospects
-                    .filter(p => p.stage !== 'Closed' && (p.probability || 50) >= 90)
+                  const weightedPipelineFTE = prospects
+                    .filter(p => p.stage !== 'Closed')
                     .reduce((pSum, p) => {
                       if (!p.start_date || !p.budget) return pSum;
+                      const prob = (p.probability || 50) / 100;
                       const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
-                      const totalRevenue = Object.values(monthlyRevenue).reduce((s, v) => s + v, 0) || 1;
+                      const totalRev = Object.values(monthlyRevenue).reduce((s, v) => s + v, 0) || 1;
                       const totalFTE = p.staffing_fte != null ? p.staffing_fte : calculateFTE(p.budget, p.duration || 1) * (p.duration || 1) / 4;
-                      const monthRevenue = monthlyRevenue[m.key] || 0;
-                      return pSum + totalFTE * (monthRevenue / totalRevenue);
+                      const monthRev = monthlyRevenue[m.key] || 0;
+                      return pSum + totalFTE * (monthRev / totalRev) * prob;
                     }, 0);
-                  const neededFTE = m.committedFTE + likelyPipelineFTE;
+                  const neededFTE = m.committedFTE + weightedPipelineFTE;
                   return { month: m.label, gap: neededFTE - m.availableStaff };
                 });
                 
-                return { totalLikelyRevenue, totalTarget, totalGap, projectsNeeded, totalWeeksNeeded, monthGapDetails, requiredStartDate, staffingGaps, periodLabel };
+                return { totalRevenue, totalTarget, totalGap, projectsNeeded, totalWeeksNeeded, monthGapDetails, requiredStartDate, staffingGaps, periodLabel, capacityConstrained, maxProjectsCanStart };
               };
               
               const first90 = calculateGapAnalysis(next3Months, 'Current 90 Days');
               const second90 = calculateGapAnalysis(following3Months, 'Following 90 Days');
+              
+              // Find prospects that need to start in next 3 months to contribute
+              const prospectsNeedingToStart = prospects
+                .filter(p => {
+                  if (p.stage === 'Closed') return false;
+                  if (!p.start_date) return false;
+                  const startDate = new Date(p.start_date);
+                  const threeMonthsOut = new Date();
+                  threeMonthsOut.setMonth(threeMonthsOut.getMonth() + 3);
+                  return startDate <= threeMonthsOut;
+                })
+                .sort((a, b) => new Date(a.start_date) - new Date(b.start_date));
               
               const formatStartDate = (date) => {
                 if (!date) return '—';
@@ -1116,7 +1320,7 @@ export default function CRMDashboard() {
                         </span>
                       </div>
                       <div style={styles.agendaItem}>
-                        <span style={styles.agendaLabel}>Current 90-Day Likely Gap</span>
+                        <span style={styles.agendaLabel}>Current 90-Day Gap (Committed + Weighted)</span>
                         <span style={{...styles.agendaValue, color: first90.totalGap <= 0 ? '#060' : '#c00'}}>
                           {formatCurrency(first90.totalGap > 0 ? -first90.totalGap : Math.abs(first90.totalGap))}
                         </span>
@@ -1130,7 +1334,7 @@ export default function CRMDashboard() {
                       <div key={idx} style={styles.agendaCard}>
                         <h3 style={styles.agendaCardTitle}>{period.periodLabel}</h3>
                         <div style={styles.agendaItem}>
-                          <span style={styles.agendaLabel}>Likely Gap (Committed + 90%+ Prospects)</span>
+                          <span style={styles.agendaLabel}>Gap (Committed + Weighted Pipeline)</span>
                           <span style={{...styles.agendaValue, color: period.totalGap <= 0 ? '#060' : '#c00'}}>
                             {formatCurrency(period.totalGap > 0 ? -period.totalGap : Math.abs(period.totalGap))}
                           </span>
@@ -1150,6 +1354,11 @@ export default function CRMDashboard() {
                           <span style={{...styles.agendaValue, color: period.projectsNeeded > 0 ? '#c00' : '#060'}}>
                             {period.projectsNeeded > 0 ? `${period.projectsNeeded} project${period.projectsNeeded > 1 ? 's' : ''} (${period.totalWeeksNeeded} weeks)` : 'None'}
                           </span>
+                          {period.capacityConstrained && (
+                            <span style={{fontSize: '12px', color: '#c00', display: 'block', marginTop: '4px'}}>
+                              ⚠️ Exceeds capacity (max {period.maxProjectsCanStart} project starts in 90 days)
+                            </span>
+                          )}
                         </div>
                         {period.projectsNeeded > 0 && (
                           <div style={styles.agendaItem}>
@@ -1172,6 +1381,43 @@ export default function CRMDashboard() {
                       </div>
                     ))}
                   </div>
+                  
+                  {/* Prospects Needing to Start */}
+                  {prospectsNeedingToStart.length > 0 && (
+                    <div style={{...styles.agendaCard, marginTop: '24px'}}>
+                      <h3 style={styles.agendaCardTitle}>Prospects to Close (Starting in Next 3 Months)</h3>
+                      <table style={{...styles.table, marginTop: '12px'}}>
+                        <thead>
+                          <tr>
+                            <th style={styles.th}>Company</th>
+                            <th style={styles.th}>Project</th>
+                            <th style={styles.th}>Budget</th>
+                            <th style={styles.th}>Prob.</th>
+                            <th style={styles.th}>Weighted</th>
+                            <th style={styles.th}>Start</th>
+                            <th style={styles.th}>Stage</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {prospectsNeedingToStart.map(p => {
+                            const prob = p.probability || 50;
+                            const weighted = (p.budget || 0) * (prob / 100);
+                            return (
+                              <tr key={p.id} style={styles.tr}>
+                                <td style={styles.td}>{p.company}</td>
+                                <td style={styles.td}>{p.project_name || '—'}</td>
+                                <td style={{...styles.td, textAlign: 'right'}}>{formatCurrency(p.budget)}</td>
+                                <td style={{...styles.td, textAlign: 'center'}}>{prob}%</td>
+                                <td style={{...styles.td, textAlign: 'right'}}>{formatCurrency(weighted)}</td>
+                                <td style={styles.td}>{formatDate(p.start_date)}</td>
+                                <td style={styles.td}>{p.stage}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
                 </div>
               );
             })()}
@@ -1523,7 +1769,8 @@ export default function CRMDashboard() {
               <ul style={styles.assumptionList}>
                 <li><strong>Default Project Assumption:</strong> $25K/week run rate, 12 weeks duration ($300K total)</li>
                 <li><strong>Projects Needed:</strong> Calculated to fill the gap in EACH month individually, not just quarterly totals</li>
-                <li><strong>90%+ Likely:</strong> Includes committed revenue plus prospects with ≥90% probability</li>
+                <li><strong>Weighted Pipeline:</strong> All prospects are weighted by their probability % in gap calculations</li>
+                <li><strong>Capacity Constraint:</strong> Max 2 new projects can start every 2 weeks (~6 per quarter)</li>
                 <li><strong>Staffing Gap:</strong> FTEs Needed − Available Staff (positive = need more people)</li>
               </ul>
             </div>
@@ -1533,6 +1780,7 @@ export default function CRMDashboard() {
               <ul style={styles.assumptionList}>
                 <li><strong>Committed:</strong> Only active projects (no prospects)</li>
                 <li><strong>Weighted Pipeline:</strong> Prospect budget × probability %</li>
+                <li><strong>Monthly View:</strong> Shows weighted values for prospects (hover for full amount)</li>
                 <li><strong>Work Type Revenue Split:</strong> If multiple types selected, revenue splits equally between them</li>
               </ul>
             </div>
@@ -1578,6 +1826,12 @@ function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate })
     // Otherwise calculate auto value
     const autoValues = calculateAutoMonthlyRevenue(item, months, type);
     return autoValues[monthKey] || 0;
+  };
+
+  const getWeightedValue = (item, value) => {
+    if (type === 'project') return value;
+    const prob = (item.probability || 50) / 100;
+    return value * prob;
   };
 
   const getTotalFromMonthly = (item) => {
@@ -1636,12 +1890,15 @@ function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate })
     return item.monthly_revenue && item.monthly_revenue[monthKey] !== undefined;
   };
 
-  // Calculate column totals
+  // Calculate column totals (weighted for prospects)
   const columnTotals = {};
+  const columnTotalsWeighted = {};
   months.forEach(m => {
     columnTotals[m.key] = items.reduce((sum, item) => sum + getMonthlyValue(item, m.key), 0);
+    columnTotalsWeighted[m.key] = items.reduce((sum, item) => sum + getWeightedValue(item, getMonthlyValue(item, m.key)), 0);
   });
   const grandTotal = Object.values(columnTotals).reduce((sum, val) => sum + val, 0);
+  const grandTotalWeighted = Object.values(columnTotalsWeighted).reduce((sum, val) => sum + val, 0);
 
   return (
     <div style={styles.monthlyTableContainer}>
@@ -1651,7 +1908,8 @@ function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate })
             <tr>
               <th style={styles.monthlyThFixed}>Client</th>
               <th style={styles.monthlyThProject}>Project</th>
-              <th style={styles.monthlyTh}>Total</th>
+              {type === 'prospect' && <th style={styles.monthlyTh}>Prob.</th>}
+              <th style={styles.monthlyTh}>{type === 'prospect' ? 'Weighted' : 'Total'}</th>
               {months.map(m => (
                 <th key={m.key} style={styles.monthlyTh}>{m.label.split(' ')[0]}</th>
               ))}
@@ -1660,14 +1918,18 @@ function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate })
           <tbody>
             {items.map(item => {
               const itemTotal = getTotalFromMonthly(item);
+              const itemTotalWeighted = type === 'prospect' ? itemTotal * ((item.probability || 50) / 100) : itemTotal;
+              const prob = item.probability || 50;
               
               return (
                 <tr key={item.id}>
                   <td style={styles.monthlyTdFixed}>{item.company}</td>
                   <td style={styles.monthlyTdProject}>{item.project_name || '—'}</td>
-                  <td style={styles.monthlyTdTotal}>{formatCurrency(itemTotal)}</td>
+                  {type === 'prospect' && <td style={{...styles.monthlyTd, textAlign: 'center', fontWeight: 600}}>{prob}%</td>}
+                  <td style={styles.monthlyTdTotal}>{formatCurrency(itemTotalWeighted)}</td>
                   {months.map(m => {
                     const value = getMonthlyValue(item, m.key);
+                    const weightedValue = getWeightedValue(item, value);
                     const isEditing = editingCell?.itemId === item.id && editingCell?.monthKey === m.key;
                     const hasOverride = isOverridden(item, m.key);
                     
@@ -1692,7 +1954,9 @@ function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate })
                             autoFocus
                           />
                         ) : (
-                          value > 0 ? formatCurrency(value) : '—'
+                          type === 'prospect' && value > 0 
+                            ? <span title={`Full: ${formatCurrency(value)}`}>{formatCurrency(weightedValue)}</span>
+                            : (value > 0 ? formatCurrency(value) : '—')
                         )}
                       </td>
                     );
@@ -1705,15 +1969,16 @@ function MonthlyEditableTable({ items, type, months, formatCurrency, onUpdate })
             <tr style={styles.monthlyTotalRow}>
               <td style={styles.monthlyTdFixed}>Total</td>
               <td style={styles.monthlyTdProject}></td>
-              <td style={styles.monthlyTdTotal}>{formatCurrency(grandTotal)}</td>
+              {type === 'prospect' && <td style={styles.monthlyTd}></td>}
+              <td style={styles.monthlyTdTotal}>{formatCurrency(type === 'prospect' ? grandTotalWeighted : grandTotal)}</td>
               {months.map(m => (
-                <td key={m.key} style={styles.monthlyTdTotal}>{formatCurrency(columnTotals[m.key])}</td>
+                <td key={m.key} style={styles.monthlyTdTotal}>{formatCurrency(type === 'prospect' ? columnTotalsWeighted[m.key] : columnTotals[m.key])}</td>
               ))}
             </tr>
           </tfoot>
         </table>
       </div>
-      <p style={styles.monthlyHint}>Click any cell to edit. Overridden values shown in bold. Press Enter to save, Escape to cancel.</p>
+      <p style={styles.monthlyHint}>Click any cell to edit. {type === 'prospect' && 'Values shown are weighted by probability. '}Overridden values shown in bold.</p>
     </div>
   );
 }
