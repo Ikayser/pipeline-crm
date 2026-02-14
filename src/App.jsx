@@ -125,7 +125,7 @@ export default function CRMDashboard() {
   const [masterTab, setMasterTab] = useState('pipeline');
   const [prospects, setProspects] = useState([]);
   const [projects, setProjects] = useState([]);
-  const [settings, setSettings] = useState({ monthlyTargets: {}, currentStaff: 0, plannedHires: {}, freelanceBudget: {} });
+  const [settings, setSettings] = useState({ monthlyTargets: {}, currentStaff: 0, plannedHires: {}, freelanceBudget: {}, costOverage: 0 });
   const [view, setView] = useState('pipeline');
   const [projectView, setProjectView] = useState('list');
   const [selectedProspect, setSelectedProspect] = useState(null);
@@ -185,12 +185,13 @@ export default function CRMDashboard() {
   const loadSettings = async () => {
     const { data, error } = await supabase.from('settings').select('*');
     if (error) { console.error('Error loading settings:', error); return; }
-    const settingsObj = { monthlyTargets: {}, currentStaff: 0, plannedHires: {}, freelanceBudget: {} };
+    const settingsObj = { monthlyTargets: {}, currentStaff: 0, plannedHires: {}, freelanceBudget: {}, costOverage: 0 };
     data?.forEach(row => {
       if (row.setting_key === 'monthlyTargets') settingsObj.monthlyTargets = row.setting_value || {};
       if (row.setting_key === 'currentStaff') settingsObj.currentStaff = row.setting_value?.value || 0;
       if (row.setting_key === 'plannedHires') settingsObj.plannedHires = row.setting_value || {};
       if (row.setting_key === 'freelanceBudget') settingsObj.freelanceBudget = row.setting_value || {};
+      if (row.setting_key === 'costOverage') settingsObj.costOverage = row.setting_value?.value || 0;
     });
     setSettings(settingsObj);
   };
@@ -340,11 +341,13 @@ export default function CRMDashboard() {
   // Projection calculations with staffing
   const getProjectionData = () => {
     const today = new Date();
+    const costOverage = settings.costOverage || 0;
     const months = MONTHS.map(m => ({ 
       ...m,
       committedRevenue: 0, pipelineRevenue: 0, pipelineRevenueWeighted: 0,
       committedFTE: 0, pipelineFTE: 0, pipelineFTEWeighted: 0,
-      target: settings.monthlyTargets[m.key] || 0,
+      target: (settings.monthlyTargets[m.key] || 0) + costOverage,
+      baseTarget: settings.monthlyTargets[m.key] || 0,
       hires: settings.plannedHires[m.key] || 0,
       freelanceBudget: settings.freelanceBudget[m.key] || 0,
       freelanceFTE: calculateFreelanceFTE(settings.freelanceBudget[m.key] || 0)
@@ -1256,433 +1259,253 @@ export default function CRMDashboard() {
             <div style={styles.navLinks}>
               <span style={styles.navLabel}>Ops Dashboard</span>
             </div>
-            <div style={styles.navActions}>
-              <div style={styles.projectionToggle}>
-                <button onClick={() => setShowWeighted(false)} style={{...styles.toggleButton, ...(!showWeighted ? styles.toggleButtonActive : {})}}>Committed Only</button>
-                <button onClick={() => setShowWeighted(true)} style={{...styles.toggleButton, ...(showWeighted ? styles.toggleButtonActive : {})}}>Weighted Pipeline</button>
-              </div>
-            </div>
           </nav>
 
           <main style={styles.main}>
-            {/* Ops Meeting Agenda */}
             {(() => {
-              const WEEKLY_RUN_RATE = 25000;
-              const DEFAULT_PROJECT_WEEKS = 12;
-              const MAX_NEW_PROJECTS_PER_2_WEEKS = 2; // Capacity constraint
-              const currentMonth = projectionData[0];
+              // Constants for projections
+              const NEW_PROJECT_VALUE = 200000;
+              const NEW_PROJECT_WEEKS = 8;
+              const MAX_NEW_PROJECTS_PER_2_WEEKS = 2;
+              
               const next3Months = projectionData.slice(0, 3);
-              const following3Months = projectionData.slice(3, 6);
+              const costOverage = settings.costOverage || 0;
               
-              // Current month committed gap
-              const currentMonthCommittedGap = currentMonth.target - currentMonth.committedRevenue;
+              // Calculate data for each of the 3 months
+              const monthlyAnalysis = next3Months.map((month, idx) => {
+                // Committed revenue
+                const committed = month.committedRevenue;
+                const target = month.target;
+                const committedGap = committed - target;
+                
+                // Weighted pipeline (>50% probability only for "likely" scenario)
+                const over50Pipeline = prospects
+                  .filter(p => p.stage !== 'Closed' && (p.probability || 50) > 50)
+                  .reduce((sum, p) => {
+                    if (!p.start_date || !p.budget) return sum;
+                    const prob = (p.probability || 50) / 100;
+                    const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
+                    return sum + (monthlyRevenue[month.key] || 0) * prob;
+                  }, 0);
+                
+                // Full weighted pipeline (all prospects)
+                const fullWeightedPipeline = month.pipelineRevenueWeighted;
+                
+                const committedPlusWeighted = committed + fullWeightedPipeline;
+                const weightedGap = committedPlusWeighted - target;
+                
+                // For "projects needed" scenario: committed + >50% converts
+                const likelyRevenue = committed + over50Pipeline;
+                const likelyGap = target - likelyRevenue;
+                
+                // FTE calculations
+                const totalFTENeeded = month.committedFTE + month.pipelineFTEWeighted;
+                const availableStaff = month.availableStaff;
+                const staffingGap = totalFTENeeded - availableStaff;
+                
+                return {
+                  label: month.label,
+                  key: month.key,
+                  target,
+                  committed,
+                  committedGap,
+                  fullWeightedPipeline,
+                  committedPlusWeighted,
+                  weightedGap,
+                  over50Pipeline,
+                  likelyRevenue,
+                  likelyGap,
+                  totalFTENeeded,
+                  availableStaff,
+                  staffingGap,
+                  hires: month.hires,
+                  freelanceFTE: month.freelanceFTE
+                };
+              });
               
-              // Helper function to calculate gap analysis for a 3-month period
-              // Uses WEIGHTED pipeline values (not just 90%+)
-              const calculateGapAnalysis = (months, periodLabel) => {
-                // Calculate revenue per month (committed + weighted pipeline)
-                const monthlyData = months.map(m => {
-                  // Weighted pipeline (all prospects weighted by probability)
-                  const weightedPipeline = prospects
-                    .filter(p => p.stage !== 'Closed')
-                    .reduce((pSum, p) => {
-                      if (!p.start_date || !p.budget) return pSum;
-                      const prob = (p.probability || 50) / 100;
-                      const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
-                      return pSum + (monthlyRevenue[m.key] || 0) * prob;
-                    }, 0);
-                  const totalRevenue = m.committedRevenue + weightedPipeline;
-                  const gap = m.target - totalRevenue;
-                  return { month: m, totalRevenue, weightedPipeline, gap };
-                });
-                
-                const totalRevenue = monthlyData.reduce((sum, d) => sum + d.totalRevenue, 0);
-                const totalTarget = months.reduce((sum, m) => sum + m.target, 0);
-                const totalGap = totalTarget - totalRevenue;
-                
-                // Calculate weeks needed to fill EACH month's gap
-                let totalWeeksNeeded = 0;
-                const monthGapDetails = monthlyData.map(d => {
-                  const weeksNeeded = d.gap > 0 ? Math.ceil(d.gap / WEEKLY_RUN_RATE) : 0;
-                  totalWeeksNeeded += weeksNeeded;
-                  return { month: d.month.label.split(' ')[0], gap: d.gap, weeksNeeded };
-                });
-                
-                // Convert total weeks to projects (12 weeks each)
-                const projectsNeeded = totalWeeksNeeded > 0 ? Math.ceil(totalWeeksNeeded / DEFAULT_PROJECT_WEEKS) : 0;
-                
-                // Capacity constraint: 2 new projects per 2 weeks = 1 per week
-                // 3 months = ~13 weeks, so max ~13 new project starts, but constrained to 2 per 2 weeks = ~6 projects
-                const weeksInPeriod = 13; // ~3 months
-                const maxProjectsCanStart = Math.floor(weeksInPeriod / 2) * MAX_NEW_PROJECTS_PER_2_WEEKS;
-                const capacityConstrained = projectsNeeded > maxProjectsCanStart;
-                
-                // Calculate required start date to fill gap
-                const periodStart = months[0]?.date;
-                const requiredStartDate = periodStart ? new Date(periodStart) : null;
-                
-                // Staffing gaps (using weighted FTE)
-                const staffingGaps = months.map(m => {
-                  const weightedPipelineFTE = prospects
-                    .filter(p => p.stage !== 'Closed')
-                    .reduce((pSum, p) => {
-                      if (!p.start_date || !p.budget) return pSum;
-                      const prob = (p.probability || 50) / 100;
-                      const monthlyRevenue = calculateMonthlyRevenueByBusinessDays(p.start_date, p.duration || 1, p.budget, MONTHS);
-                      const totalRev = Object.values(monthlyRevenue).reduce((s, v) => s + v, 0) || 1;
-                      const totalFTE = p.staffing_fte != null ? p.staffing_fte : calculateFTE(p.budget, p.duration || 1) * (p.duration || 1) / 4;
-                      const monthRev = monthlyRevenue[m.key] || 0;
-                      return pSum + totalFTE * (monthRev / totalRev) * prob;
-                    }, 0);
-                  const neededFTE = m.committedFTE + weightedPipelineFTE;
-                  return { month: m.label, gap: neededFTE - m.availableStaff };
-                });
-                
-                return { totalRevenue, totalTarget, totalGap, projectsNeeded, totalWeeksNeeded, monthGapDetails, requiredStartDate, staffingGaps, periodLabel, capacityConstrained, maxProjectsCanStart };
-              };
+              // Calculate projects needed scenario
+              // Constraint: 2 new projects can start every 2 weeks
+              // Each project = $200K over 8 weeks = $25K/week
+              const weeksPerMonth = 4.33;
+              const revenuePerWeekPerProject = NEW_PROJECT_VALUE / NEW_PROJECT_WEEKS;
               
-              const first90 = calculateGapAnalysis(next3Months, 'Current 90 Days');
-              const second90 = calculateGapAnalysis(following3Months, 'Following 90 Days');
+              const projectsNeededScenario = monthlyAnalysis.map((m, monthIdx) => {
+                const gap = m.likelyGap;
+                if (gap <= 0) return { ...m, projectsNeeded: 0, weeksNeeded: 0, achievable: true, shortfall: 0 };
+                
+                // How many project-weeks needed to fill this gap?
+                const weeksNeeded = Math.ceil(gap / revenuePerWeekPerProject);
+                
+                // How many projects can we start that will contribute to this month?
+                // Projects started in month 0 contribute to months 0, 1, 2 (8 weeks spans ~2 months)
+                // Projects must start at or before this month to contribute
+                const weeksAvailableBefore = (monthIdx + 1) * weeksPerMonth;
+                const projectStartSlots = Math.floor(weeksAvailableBefore / 2) * MAX_NEW_PROJECTS_PER_2_WEEKS;
+                
+                // Each project contributes ~4 weeks to this month if started at right time
+                const maxProjectsForThisMonth = projectStartSlots;
+                const projectsNeeded = Math.ceil(weeksNeeded / NEW_PROJECT_WEEKS);
+                const achievable = projectsNeeded <= maxProjectsForThisMonth;
+                const shortfall = achievable ? 0 : gap - (maxProjectsForThisMonth * NEW_PROJECT_VALUE * (NEW_PROJECT_WEEKS / NEW_PROJECT_WEEKS));
+                
+                return { ...m, projectsNeeded, weeksNeeded, achievable, shortfall, maxProjectsForThisMonth };
+              });
               
-              // Find prospects that need to start in next 3 months to contribute
-              const prospectsNeedingToStart = prospects
-                .filter(p => {
-                  if (p.stage === 'Closed') return false;
-                  if (!p.start_date) return false;
-                  const startDate = new Date(p.start_date);
-                  const threeMonthsOut = new Date();
-                  threeMonthsOut.setMonth(threeMonthsOut.getMonth() + 3);
-                  return startDate <= threeMonthsOut;
-                })
-                .sort((a, b) => new Date(a.start_date) - new Date(b.start_date));
-              
-              const formatStartDate = (date) => {
-                if (!date) return '—';
-                return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-              };
+              // Find the max revenue for chart scaling
+              const maxRevForChart = Math.max(
+                ...monthlyAnalysis.map(m => Math.max(m.target, m.committedPlusWeighted))
+              );
 
               return (
                 <div style={styles.agendaSection}>
-                  <h2 style={styles.agendaTitle}>Ops Meeting Agenda</h2>
                   
-                  {/* Current Situation */}
-                  <div style={{...styles.agendaCard, marginBottom: '24px'}}>
-                    <h3 style={styles.agendaCardTitle}>Current Situation</h3>
-                    <div style={styles.agendaGrid}>
-                      <div style={styles.agendaItem}>
-                        <span style={styles.agendaLabel}>Current Month Gap (Committed vs Target)</span>
-                        <span style={{...styles.agendaValue, color: currentMonthCommittedGap <= 0 ? '#060' : '#c00'}}>
-                          {formatCurrency(currentMonthCommittedGap > 0 ? -currentMonthCommittedGap : Math.abs(currentMonthCommittedGap))}
-                        </span>
+                  {/* SECTION 1: Revenue */}
+                  <div style={{...styles.agendaCard, marginBottom: '32px'}}>
+                    <h2 style={styles.agendaTitle}>Section 1: Revenue</h2>
+                    
+                    {/* Revenue Table */}
+                    <table style={{...styles.table, marginBottom: '24px'}}>
+                      <thead>
+                        <tr>
+                          <th style={styles.th}>Month</th>
+                          <th style={styles.th}>Target</th>
+                          <th style={styles.th}>Committed</th>
+                          <th style={styles.th}>Gap</th>
+                          <th style={styles.th}>+ Weighted</th>
+                          <th style={styles.th}>Total</th>
+                          <th style={styles.th}>Gap</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {monthlyAnalysis.map(m => (
+                          <tr key={m.key} style={styles.tr}>
+                            <td style={{...styles.td, fontWeight: 600}}>{m.label}</td>
+                            <td style={styles.td}>{formatCurrency(m.target)}</td>
+                            <td style={styles.td}>{formatCurrency(m.committed)}</td>
+                            <td style={{...styles.td, color: m.committedGap >= 0 ? '#060' : '#c00', fontWeight: 600}}>
+                              {m.committedGap >= 0 ? '+' : ''}{formatCurrency(m.committedGap)}
+                            </td>
+                            <td style={{...styles.td, color: '#666'}}>{formatCurrency(m.fullWeightedPipeline)}</td>
+                            <td style={styles.td}>{formatCurrency(m.committedPlusWeighted)}</td>
+                            <td style={{...styles.td, color: m.weightedGap >= 0 ? '#060' : '#c00', fontWeight: 600}}>
+                              {m.weightedGap >= 0 ? '+' : ''}{formatCurrency(m.weightedGap)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    
+                    {/* Revenue Chart */}
+                    <div style={styles.chartContainer}>
+                      <div style={styles.chartYAxis}>
+                        <span>{formatCurrency(maxRevForChart)}</span>
+                        <span>{formatCurrency(maxRevForChart / 2)}</span>
+                        <span>$0</span>
                       </div>
-                      <div style={styles.agendaItem}>
-                        <span style={styles.agendaLabel}>Current 90-Day Gap (Committed + Weighted)</span>
-                        <span style={{...styles.agendaValue, color: first90.totalGap <= 0 ? '#060' : '#c00'}}>
-                          {formatCurrency(first90.totalGap > 0 ? -first90.totalGap : Math.abs(first90.totalGap))}
-                        </span>
+                      <div style={{...styles.chart, gridTemplateColumns: `repeat(${monthlyAnalysis.length}, 1fr)`}}>
+                        {monthlyAnalysis.map((m, idx) => (
+                          <div key={m.key} style={styles.chartBar}>
+                            <div style={styles.chartBarStack}>
+                              <div style={{...styles.chartBarSegment, height: `${maxRevForChart ? (m.fullWeightedPipeline / maxRevForChart) * 100 : 0}%`, backgroundColor: '#999'}} />
+                              <div style={{...styles.chartBarSegment, height: `${maxRevForChart ? (m.committed / maxRevForChart) * 100 : 0}%`, backgroundColor: '#000'}} />
+                            </div>
+                            {m.target > 0 && (
+                              <div style={{...styles.targetLine, bottom: `${(m.target / maxRevForChart) * 100}%`}}>
+                                <span style={styles.targetLineLabel}>{formatCurrency(m.target)}</span>
+                              </div>
+                            )}
+                            <div style={styles.chartBarLabel}>{m.label}</div>
+                            <div style={styles.chartBarValue}>{formatCurrency(m.committedPlusWeighted)}</div>
+                          </div>
+                        ))}
                       </div>
+                    </div>
+                    <div style={styles.chartLegend}>
+                      <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#000'}} /><span>Committed</span></div>
+                      <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#999'}} /><span>Weighted Pipeline</span></div>
+                      <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: 'transparent', border: '2px solid #c00'}} /><span>Target</span></div>
                     </div>
                   </div>
                   
-                  {/* Gap Analysis - Two periods side by side */}
-                  <div style={styles.agendaGrid}>
-                    {[first90, second90].map((period, idx) => (
-                      <div key={idx} style={styles.agendaCard}>
-                        <h3 style={styles.agendaCardTitle}>{period.periodLabel}</h3>
-                        <div style={styles.agendaItem}>
-                          <span style={styles.agendaLabel}>Gap (Committed + Weighted Pipeline)</span>
-                          <span style={{...styles.agendaValue, color: period.totalGap <= 0 ? '#060' : '#c00'}}>
-                            {formatCurrency(period.totalGap > 0 ? -period.totalGap : Math.abs(period.totalGap))}
-                          </span>
-                        </div>
-                        <div style={styles.agendaItem}>
-                          <span style={styles.agendaLabel}>Monthly Gaps</span>
-                          <div style={styles.staffingGapList}>
-                            {period.monthGapDetails.map((mg, i) => (
-                              <span key={i} style={{...styles.staffingGapItem, color: mg.gap > 0 ? '#c00' : '#060'}}>
-                                {mg.month}: {formatCurrency(mg.gap > 0 ? -mg.gap : Math.abs(mg.gap))}
-                              </span>
-                            ))}
+                  {/* SECTION 2: Projects Needed */}
+                  <div style={{...styles.agendaCard, marginBottom: '32px'}}>
+                    <h2 style={styles.agendaTitle}>Section 2: Projects Needed</h2>
+                    <p style={{fontSize: '13px', color: '#666', marginBottom: '16px'}}>
+                      Scenario: Committed revenue holds, opportunities &gt;50% convert, new projects are $200K over 8 weeks, max 2 new project starts every 2 weeks.
+                    </p>
+                    
+                    {projectsNeededScenario.map(m => (
+                      <div key={m.key} style={{marginBottom: '20px', padding: '16px', backgroundColor: '#f9f9f9', border: '1px solid #eee'}}>
+                        <h3 style={{fontSize: '16px', fontWeight: 700, marginBottom: '8px'}}>{m.label}</h3>
+                        <div style={{fontSize: '14px', lineHeight: '1.8'}}>
+                          <div><strong>Target:</strong> {formatCurrency(m.target)}</div>
+                          <div><strong>Committed:</strong> {formatCurrency(m.committed)}</div>
+                          <div><strong>&gt;50% Likely Pipeline:</strong> {formatCurrency(m.over50Pipeline)}</div>
+                          <div><strong>Expected Revenue:</strong> {formatCurrency(m.likelyRevenue)}</div>
+                          <div style={{color: m.likelyGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>
+                            <strong>Gap:</strong> {m.likelyGap <= 0 ? 'On track ✓' : `-${formatCurrency(m.likelyGap)}`}
                           </div>
-                        </div>
-                        <div style={styles.agendaItem}>
-                          <span style={styles.agendaLabel}>New Work Needed ($25K/wk × 12wk projects)</span>
-                          <span style={{...styles.agendaValue, color: period.projectsNeeded > 0 ? '#c00' : '#060'}}>
-                            {period.projectsNeeded > 0 ? `${period.projectsNeeded} project${period.projectsNeeded > 1 ? 's' : ''} (${period.totalWeeksNeeded} weeks)` : 'None'}
-                          </span>
-                          {period.capacityConstrained && (
-                            <span style={{fontSize: '12px', color: '#c00', display: 'block', marginTop: '4px'}}>
-                              ⚠️ Exceeds capacity (max {period.maxProjectsCanStart} project starts in 90 days)
-                            </span>
+                          {m.likelyGap > 0 && (
+                            <>
+                              <div style={{marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #ddd'}}>
+                                <strong>New Projects Needed:</strong> {m.projectsNeeded} project{m.projectsNeeded !== 1 ? 's' : ''} 
+                                ({m.weeksNeeded} project-weeks at $25K/week)
+                              </div>
+                              {!m.achievable && (
+                                <div style={{color: '#c00', marginTop: '4px'}}>
+                                  ⚠️ Exceeds capacity — can only start {m.maxProjectsForThisMonth} projects by this month
+                                </div>
+                              )}
+                            </>
                           )}
-                        </div>
-                        {period.projectsNeeded > 0 && (
-                          <div style={styles.agendaItem}>
-                            <span style={styles.agendaLabel}>Required Start Date</span>
-                            <span style={{...styles.agendaValue, fontSize: '16px'}}>
-                              By {formatStartDate(period.requiredStartDate)}
-                            </span>
-                          </div>
-                        )}
-                        <div style={styles.agendaItem}>
-                          <span style={styles.agendaLabel}>Staffing Gaps (FTEs Needed - Available)</span>
-                          <div style={styles.staffingGapList}>
-                            {period.staffingGaps.map((sg, i) => (
-                              <span key={i} style={{...styles.staffingGapItem, color: sg.gap > 0 ? '#c00' : '#060'}}>
-                                {sg.month.split(' ')[0]}: {sg.gap > 0 ? '+' : ''}{sg.gap.toFixed(1)}
-                              </span>
-                            ))}
-                          </div>
                         </div>
                       </div>
                     ))}
                   </div>
                   
-                  {/* Prospects Needing to Start */}
-                  {prospectsNeedingToStart.length > 0 && (
-                    <div style={{...styles.agendaCard, marginTop: '24px'}}>
-                      <h3 style={styles.agendaCardTitle}>Prospects to Close (Starting in Next 3 Months)</h3>
-                      <table style={{...styles.table, marginTop: '12px'}}>
-                        <thead>
-                          <tr>
-                            <th style={styles.th}>Company</th>
-                            <th style={styles.th}>Project</th>
-                            <th style={styles.th}>Budget</th>
-                            <th style={styles.th}>Prob.</th>
-                            <th style={styles.th}>Weighted</th>
-                            <th style={styles.th}>Start</th>
-                            <th style={styles.th}>Stage</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {prospectsNeedingToStart.map(p => {
-                            const prob = p.probability || 50;
-                            const weighted = (p.budget || 0) * (prob / 100);
-                            return (
-                              <tr key={p.id} style={styles.tr}>
-                                <td style={styles.td}>{p.company}</td>
-                                <td style={styles.td}>{p.project_name || '—'}</td>
-                                <td style={{...styles.td, textAlign: 'right'}}>{formatCurrency(p.budget)}</td>
-                                <td style={{...styles.td, textAlign: 'center'}}>{prob}%</td>
-                                <td style={{...styles.td, textAlign: 'right'}}>{formatCurrency(weighted)}</td>
-                                <td style={styles.td}>{formatDate(p.start_date)}</td>
-                                <td style={styles.td}>{p.stage}</td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
+                  {/* SECTION 3: Staffing Needs */}
+                  <div style={{...styles.agendaCard}}>
+                    <h2 style={styles.agendaTitle}>Section 3: Staffing Needs</h2>
+                    <p style={{fontSize: '13px', color: '#666', marginBottom: '16px'}}>
+                      Assessment based on committed + weighted pipeline FTE requirements vs. current staff, planned hires, and freelance capacity.
+                    </p>
+                    
+                    {monthlyAnalysis.map((m, idx) => {
+                      // Calculate cumulative hires up to this month
+                      let cumulativeHires = 0;
+                      for (let i = 0; i <= idx; i++) {
+                        cumulativeHires += (settings.plannedHires[next3Months[i].key] || 0);
+                      }
+                      const currentStaffWithHires = settings.currentStaff + cumulativeHires;
+                      const totalAvailable = currentStaffWithHires + m.freelanceFTE;
+                      const gap = m.totalFTENeeded - totalAvailable;
+                      
+                      return (
+                        <div key={m.key} style={{marginBottom: '20px', padding: '16px', backgroundColor: '#f9f9f9', border: '1px solid #eee'}}>
+                          <h3 style={{fontSize: '16px', fontWeight: 700, marginBottom: '8px'}}>{m.label}</h3>
+                          <div style={{fontSize: '14px', lineHeight: '1.8'}}>
+                            <div><strong>FTEs Needed (Committed + Weighted):</strong> {m.totalFTENeeded.toFixed(1)}</div>
+                            <div style={{marginTop: '8px'}}>
+                              <strong>Available:</strong>
+                              <ul style={{margin: '4px 0 0 20px', padding: 0}}>
+                                <li>Current Staff: {settings.currentStaff}</li>
+                                {cumulativeHires > 0 && <li>+ Planned Hires (cumulative): {cumulativeHires}</li>}
+                                <li>+ Freelance Equivalent: {m.freelanceFTE.toFixed(1)}</li>
+                              </ul>
+                            </div>
+                            <div><strong>Total Available:</strong> {totalAvailable.toFixed(1)} FTEs</div>
+                            <div style={{color: gap <= 0 ? '#060' : '#c00', fontWeight: 600, marginTop: '8px'}}>
+                              <strong>Staffing Gap:</strong> {gap <= 0 ? `Covered (+${Math.abs(gap).toFixed(1)} buffer)` : `Need ${gap.toFixed(1)} more FTEs`}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  
                 </div>
               );
             })()}
-
-            {/* 3-Month Revenue Detail */}
-            <div style={styles.threeMonthSection}>
-              <h2 style={styles.projectionTitle}>Next 3 Months Detail</h2>
-              <div style={styles.threeMonthGrid}>
-                {projectionData.slice(0, 3).map((month, idx) => {
-                  const pipeline = showWeighted ? month.pipelineRevenueWeighted : 0;
-                  const committedGap = month.target - month.committedRevenue;
-                  const totalGap = month.target - (month.committedRevenue + pipeline);
-                  return (
-                    <div key={idx} style={styles.threeMonthCard}>
-                      <h3 style={styles.threeMonthTitle}>{month.label}</h3>
-                      <div style={styles.threeMonthRow}>
-                        <span style={styles.threeMonthLabel}>Target</span>
-                        <span style={styles.threeMonthValue}>{formatCurrency(month.target)}</span>
-                      </div>
-                      <div style={styles.threeMonthRow}>
-                        <span style={styles.threeMonthLabel}>Committed</span>
-                        <span style={styles.threeMonthValue}>{formatCurrency(month.committedRevenue)}</span>
-                      </div>
-                      <div style={styles.threeMonthRow}>
-                        <span style={styles.threeMonthLabel}>Gap (Target - Committed)</span>
-                        <span style={{...styles.threeMonthValue, color: committedGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>
-                          {formatCurrency(-committedGap)}
-                        </span>
-                      </div>
-                      {showWeighted && (
-                        <>
-                          <div style={styles.threeMonthDivider} />
-                          <div style={styles.threeMonthRow}>
-                            <span style={styles.threeMonthLabel}>Committed + Weighted</span>
-                            <span style={styles.threeMonthValue}>{formatCurrency(month.committedRevenue + pipeline)}</span>
-                          </div>
-                          <div style={styles.threeMonthRow}>
-                            <span style={styles.threeMonthLabel}>Gap (Target - Total)</span>
-                            <span style={{...styles.threeMonthValue, color: totalGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>
-                              {formatCurrency(-totalGap)}
-                            </span>
-                          </div>
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-              {/* Quarter Summary */}
-              {(() => {
-                const q1Data = projectionData.slice(0, 3);
-                const qTarget = q1Data.reduce((sum, m) => sum + m.target, 0);
-                const qCommitted = q1Data.reduce((sum, m) => sum + m.committedRevenue, 0);
-                const qPipeline = showWeighted ? q1Data.reduce((sum, m) => sum + m.pipelineRevenueWeighted, 0) : 0;
-                const qCommittedGap = qTarget - qCommitted;
-                const qTotalGap = qTarget - (qCommitted + qPipeline);
-                return (
-                  <div style={{...styles.threeMonthCard, marginTop: '16px', backgroundColor: '#f5f5f5'}}>
-                    <h3 style={styles.threeMonthTitle}>Quarter Total</h3>
-                    <div style={{display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px'}}>
-                      <div>
-                        <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>Target</span><span style={styles.threeMonthValue}>{formatCurrency(qTarget)}</span></div>
-                      </div>
-                      <div>
-                        <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>Committed</span><span style={styles.threeMonthValue}>{formatCurrency(qCommitted)}</span></div>
-                      </div>
-                      <div>
-                        <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>Gap</span><span style={{...styles.threeMonthValue, color: qCommittedGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>{formatCurrency(-qCommittedGap)}</span></div>
-                      </div>
-                    </div>
-                    {showWeighted && (
-                      <div style={{display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '16px', marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #ddd'}}>
-                        <div>
-                          <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>+ Weighted</span><span style={styles.threeMonthValue}>{formatCurrency(qPipeline)}</span></div>
-                        </div>
-                        <div>
-                          <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>Total</span><span style={styles.threeMonthValue}>{formatCurrency(qCommitted + qPipeline)}</span></div>
-                        </div>
-                        <div>
-                          <div style={styles.threeMonthRow}><span style={styles.threeMonthLabel}>Gap</span><span style={{...styles.threeMonthValue, color: qTotalGap <= 0 ? '#060' : '#c00', fontWeight: 600}}>{formatCurrency(-qTotalGap)}</span></div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
-
-            {/* Revenue Chart */}
-            <div style={{...styles.projectionsView, marginTop: '48px'}}>
-              <div style={styles.projectionHeader}>
-                <h2 style={styles.projectionTitle}>Revenue vs Target</h2>
-              </div>
-              <div style={styles.chartLegend}>
-                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#000'}} /><span>Committed</span></div>
-                {showWeighted && <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#999'}} /><span>Pipeline</span></div>}
-                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: 'transparent', border: '2px solid #c00'}} /><span>Target</span></div>
-              </div>
-              <div style={styles.chartContainer}>
-                <div style={styles.chartYAxis}><span>{formatCurrency(maxRevenue)}</span><span>{formatCurrency(maxRevenue / 2)}</span><span>$0</span></div>
-                <div style={styles.chart}>
-                  {projectionData.map((month, idx) => {
-                    const pipeline = showWeighted ? month.pipelineRevenueWeighted : 0;
-                    const total = month.committedRevenue + pipeline;
-                    return (
-                      <div key={idx} style={styles.chartBar}>
-                        <div style={styles.chartBarStack}>
-                          {showWeighted && <div style={{...styles.chartBarSegment, height: `${maxRevenue ? (pipeline / maxRevenue) * 100 : 0}%`, backgroundColor: '#999'}} />}
-                          <div style={{...styles.chartBarSegment, height: `${maxRevenue ? (month.committedRevenue / maxRevenue) * 100 : 0}%`, backgroundColor: '#000'}} />
-                        </div>
-                        {month.target > 0 && (
-                          <div style={{...styles.targetLine, bottom: `${(month.target / maxRevenue) * 100}%`}}>
-                            <span style={styles.targetLineLabel}>{formatCurrency(month.target)}</span>
-                          </div>
-                        )}
-                        <div style={styles.chartBarLabel}>{month.label}</div>
-                        {total > 0 && <div style={styles.chartBarValue}>{formatCurrency(total)}</div>}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-              <div style={styles.projectionSummary}>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>12-Month Total</span><span style={styles.projectionSummaryValue}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : 0), 0))}</span></div>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>12-Month Target</span><span style={styles.projectionSummaryValue}>{formatCurrency(annualTarget)}</span></div>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Gap</span><span style={{...styles.projectionSummaryValue, color: projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : 0), 0) >= annualTarget ? '#060' : '#c00'}}>{formatCurrency(projectionData.reduce((sum, m) => sum + m.committedRevenue + (showWeighted ? m.pipelineRevenueWeighted : 0), 0) - annualTarget)}</span></div>
-              </div>
-            </div>
-
-            {/* Staffing Chart */}
-            <div style={{...styles.projectionsView, marginTop: '48px'}}>
-              <div style={styles.projectionHeader}>
-                <h2 style={styles.projectionTitle}>Staffing: Available vs Needed</h2>
-              </div>
-              <div style={styles.chartLegend}>
-                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#000'}} /><span>Committed FTEs</span></div>
-                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: '#999'}} /><span>Pipeline FTEs</span></div>
-                <div style={styles.legendItem}><div style={{...styles.legendColor, backgroundColor: 'transparent', border: '2px solid #060'}} /><span>Staff + Freelance</span></div>
-              </div>
-              <div style={styles.chartContainer}>
-                <div style={styles.chartYAxis}><span>{maxFTE.toFixed(1)}</span><span>{(maxFTE / 2).toFixed(1)}</span><span>0</span></div>
-                <div style={styles.chart}>
-                  {projectionData.map((month, idx) => {
-                    const pipelineFTE = showWeighted ? month.pipelineFTEWeighted : month.pipelineFTE;
-                    return (
-                      <div key={idx} style={styles.chartBar}>
-                        <div style={styles.chartBarStack}>
-                          <div style={{...styles.chartBarSegment, height: `${maxFTE ? (pipelineFTE / maxFTE) * 100 : 0}%`, backgroundColor: '#999'}} />
-                          <div style={{...styles.chartBarSegment, height: `${maxFTE ? (month.committedFTE / maxFTE) * 100 : 0}%`, backgroundColor: '#000'}} />
-                        </div>
-                        <div style={{...styles.availableStaffLine, bottom: `${(month.availableStaff / maxFTE) * 100}%`}} />
-                        <div style={styles.chartBarLabel}>{month.label}</div>
-                        <div style={styles.chartBarValue}>{(month.committedFTE + pipelineFTE).toFixed(1)}</div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-              <div style={styles.projectionSummary}>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Current Staff</span><span style={styles.projectionSummaryValue}>{settings.currentStaff}</span></div>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Planned Hires (12mo)</span><span style={styles.projectionSummaryValue}>{MONTHS.reduce((sum, m) => sum + (settings.plannedHires[m.key] || 0), 0)}</span></div>
-                <div style={styles.projectionSummaryItem}><span style={styles.projectionSummaryLabel}>Avg Freelance FTEs</span><span style={styles.projectionSummaryValue}>{(MONTHS.reduce((sum, m) => sum + calculateFreelanceFTE(settings.freelanceBudget[m.key] || 0), 0) / 12).toFixed(1)}</span></div>
-              </div>
-            </div>
-
-            {/* Monthly Breakdown Table */}
-            <div style={{marginTop: '48px'}}>
-              <h3 style={styles.insightTitle}>Monthly Breakdown</h3>
-              <div style={styles.listView}>
-                <table style={styles.table}>
-                  <thead><tr>
-                    <th style={styles.th}>Month</th>
-                    <th style={styles.th}>Target</th>
-                    <th style={styles.th}>Committed</th>
-                    <th style={styles.th}>Pipeline</th>
-                    <th style={styles.th}>Total</th>
-                    <th style={styles.th}>Gap</th>
-                    <th style={styles.th}>FTEs Needed</th>
-                    <th style={styles.th}>Staff</th>
-                    <th style={styles.th}>Freelance</th>
-                    <th style={styles.th}>Staffing Gap</th>
-                  </tr></thead>
-                  <tbody>
-                    {projectionData.map((month, idx) => {
-                      const pipeline = showWeighted ? month.pipelineRevenueWeighted : month.pipelineRevenue;
-                      const pipelineFTE = showWeighted ? month.pipelineFTEWeighted : month.pipelineFTE;
-                      const total = month.committedRevenue + pipeline;
-                      const revenueGap = total - month.target;
-                      const neededFTE = month.committedFTE + pipelineFTE;
-                      const staffingGap = neededFTE - month.availableStaff;
-                      return (
-                        <tr key={idx} style={styles.tr}>
-                          <td style={styles.td}>{month.label}</td>
-                          <td style={styles.td}>{formatCurrency(month.target)}</td>
-                          <td style={styles.td}>{formatCurrency(month.committedRevenue)}</td>
-                          <td style={styles.tdSecondary}>{formatCurrency(pipeline)}</td>
-                          <td style={styles.td}>{formatCurrency(total)}</td>
-                          <td style={{...styles.td, color: revenueGap >= 0 ? '#060' : '#c00', fontWeight: 600}}>{formatCurrency(revenueGap)}</td>
-                          <td style={styles.td}>{neededFTE.toFixed(1)}</td>
-                          <td style={styles.td}>{month.fullTimeStaff.toFixed(1)}</td>
-                          <td style={styles.td}>{month.freelanceFTE.toFixed(1)}</td>
-                          <td style={{...styles.td, color: staffingGap > 0 ? '#c00' : '#060', fontWeight: 600}}>{staffingGap > 0 ? '+' : ''}{staffingGap.toFixed(1)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
           </main>
         </>
       )}
@@ -2044,6 +1867,7 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
   const [currentStaff, setCurrentStaff] = useState(settings.currentStaff || 0);
   const [plannedHires, setPlannedHires] = useState(settings.plannedHires || {});
   const [freelanceBudget, setFreelanceBudget] = useState(settings.freelanceBudget || {});
+  const [costOverage, setCostOverage] = useState(settings.costOverage || 0);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -2051,6 +1875,7 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
     setCurrentStaff(settings.currentStaff || 0);
     setPlannedHires(settings.plannedHires || {});
     setFreelanceBudget(settings.freelanceBudget || {});
+    setCostOverage(settings.costOverage || 0);
   }, [settings]);
 
   const handleSaveAll = async () => {
@@ -2059,6 +1884,7 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
     await onSave('currentStaff', { value: currentStaff });
     await onSave('plannedHires', plannedHires);
     await onSave('freelanceBudget', freelanceBudget);
+    await onSave('costOverage', { value: costOverage });
     setSaving(false);
   };
 
@@ -2090,10 +1916,27 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
           </div>
         </div>
 
+        {/* Cost Overage */}
+        <div style={styles.settingsSection}>
+          <h3 style={styles.insightTitle}>Monthly Cost Overage</h3>
+          <p style={styles.settingsSubtitle}>Added to revenue target each month (e.g., overhead costs not covered by billable work)</p>
+          <div style={styles.formGroup}>
+            <label style={styles.formLabel}>Amount per Month</label>
+            <input 
+              type="number" 
+              value={costOverage} 
+              onChange={e => setCostOverage(Number(e.target.value))} 
+              style={{...styles.input, width: '150px'}} 
+              min="0"
+              placeholder="0"
+            />
+          </div>
+        </div>
+
         {/* Monthly Targets */}
         <div style={styles.settingsSection}>
           <h3 style={styles.insightTitle}>Monthly Revenue Targets</h3>
-          <p style={styles.settingsSubtitle}>Annual Target: {formatCurrency(annualTarget)}</p>
+          <p style={styles.settingsSubtitle}>Annual Target: {formatCurrency(annualTarget)} (+ {formatCurrency(costOverage * 12)} overage = {formatCurrency(annualTarget + costOverage * 12)} effective)</p>
           <div style={styles.monthGrid}>
             {MONTHS.map(month => (
               <div key={month.key} style={styles.monthInputGroup}>
