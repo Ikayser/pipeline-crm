@@ -14,12 +14,11 @@ const HOURS_PER_WEEK = 36; // Adjusted for PTO, etc.
 const FREELANCE_DAY_RATE = 1000; // $ per day for freelancers
 const WORKING_DAYS_PER_MONTH = 20;
 
-// Generate next 12 months starting from current month
-const getNext12Months = () => {
+// Generate all months of 2026
+const get2026Months = () => {
   const months = [];
-  const today = new Date();
   for (let i = 0; i < 12; i++) {
-    const date = new Date(today.getFullYear(), today.getMonth() + i, 1);
+    const date = new Date(2026, i, 1);
     months.push({
       key: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`,
       label: date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
@@ -29,7 +28,7 @@ const getNext12Months = () => {
   return months;
 };
 
-const MONTHS = getNext12Months();
+const MONTHS = get2026Months();
 
 // US Federal Holidays 2026 (and 2025 for edge cases)
 const HOLIDAYS = [
@@ -125,7 +124,7 @@ export default function CRMDashboard() {
   const [masterTab, setMasterTab] = useState('pipeline');
   const [prospects, setProspects] = useState([]);
   const [projects, setProjects] = useState([]);
-  const [settings, setSettings] = useState({ monthlyTargets: {}, currentStaff: 0, plannedHires: {}, freelanceBudget: {}, costOverage: 0 });
+  const [settings, setSettings] = useState({ monthlyTargets: {}, currentStaff: 0, plannedHires: {}, freelanceBudget: {}, monthlyOverage: {} });
   const [view, setView] = useState('pipeline');
   const [projectView, setProjectView] = useState('list');
   const [selectedProspect, setSelectedProspect] = useState(null);
@@ -185,13 +184,13 @@ export default function CRMDashboard() {
   const loadSettings = async () => {
     const { data, error } = await supabase.from('settings').select('*');
     if (error) { console.error('Error loading settings:', error); return; }
-    const settingsObj = { monthlyTargets: {}, currentStaff: 0, plannedHires: {}, freelanceBudget: {}, costOverage: 0 };
+    const settingsObj = { monthlyTargets: {}, currentStaff: 0, plannedHires: {}, freelanceBudget: {}, monthlyOverage: {} };
     data?.forEach(row => {
       if (row.setting_key === 'monthlyTargets') settingsObj.monthlyTargets = row.setting_value || {};
       if (row.setting_key === 'currentStaff') settingsObj.currentStaff = row.setting_value?.value || 0;
       if (row.setting_key === 'plannedHires') settingsObj.plannedHires = row.setting_value || {};
       if (row.setting_key === 'freelanceBudget') settingsObj.freelanceBudget = row.setting_value || {};
-      if (row.setting_key === 'costOverage') settingsObj.costOverage = row.setting_value?.value || 0;
+      if (row.setting_key === 'monthlyOverage') settingsObj.monthlyOverage = row.setting_value || {};
     });
     setSettings(settingsObj);
   };
@@ -341,13 +340,13 @@ export default function CRMDashboard() {
   // Projection calculations with staffing
   const getProjectionData = () => {
     const today = new Date();
-    const costOverage = settings.costOverage || 0;
     const months = MONTHS.map(m => ({ 
       ...m,
       committedRevenue: 0, pipelineRevenue: 0, pipelineRevenueWeighted: 0,
       committedFTE: 0, pipelineFTE: 0, pipelineFTEWeighted: 0,
-      target: (settings.monthlyTargets[m.key] || 0) + costOverage,
+      target: (settings.monthlyTargets[m.key] || 0) + (settings.monthlyOverage?.[m.key] || 0),
       baseTarget: settings.monthlyTargets[m.key] || 0,
+      overage: settings.monthlyOverage?.[m.key] || 0,
       hires: settings.plannedHires[m.key] || 0,
       freelanceBudget: settings.freelanceBudget[m.key] || 0,
       freelanceFTE: calculateFreelanceFTE(settings.freelanceBudget[m.key] || 0)
@@ -1268,8 +1267,12 @@ export default function CRMDashboard() {
               const NEW_PROJECT_WEEKS = 8;
               const MAX_NEW_PROJECTS_PER_2_WEEKS = 2;
               
-              const next3Months = projectionData.slice(0, 3);
-              const costOverage = settings.costOverage || 0;
+              // Find current month and next 2 months in 2026
+              const today = new Date();
+              const currentMonthKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`;
+              let startIdx = projectionData.findIndex(m => m.key >= currentMonthKey);
+              if (startIdx === -1) startIdx = 0; // If we're before 2026 or after, default to start
+              const next3Months = projectionData.slice(startIdx, startIdx + 3);
               
               // Calculate data for each of the 3 months
               const monthlyAnalysis = next3Months.map((month, idx) => {
@@ -1867,7 +1870,7 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
   const [currentStaff, setCurrentStaff] = useState(settings.currentStaff || 0);
   const [plannedHires, setPlannedHires] = useState(settings.plannedHires || {});
   const [freelanceBudget, setFreelanceBudget] = useState(settings.freelanceBudget || {});
-  const [costOverage, setCostOverage] = useState(settings.costOverage || 0);
+  const [monthlyOverage, setMonthlyOverage] = useState(settings.monthlyOverage || {});
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -1875,7 +1878,7 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
     setCurrentStaff(settings.currentStaff || 0);
     setPlannedHires(settings.plannedHires || {});
     setFreelanceBudget(settings.freelanceBudget || {});
-    setCostOverage(settings.costOverage || 0);
+    setMonthlyOverage(settings.monthlyOverage || {});
   }, [settings]);
 
   const handleSaveAll = async () => {
@@ -1884,11 +1887,12 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
     await onSave('currentStaff', { value: currentStaff });
     await onSave('plannedHires', plannedHires);
     await onSave('freelanceBudget', freelanceBudget);
-    await onSave('costOverage', { value: costOverage });
+    await onSave('monthlyOverage', monthlyOverage);
     setSaving(false);
   };
 
   const annualTarget = MONTHS.reduce((sum, m) => sum + (monthlyTargets[m.key] || 0), 0);
+  const annualOverage = MONTHS.reduce((sum, m) => sum + (monthlyOverage[m.key] || 0), 0);
   const totalHires = MONTHS.reduce((sum, m) => sum + (plannedHires[m.key] || 0), 0);
   const totalFreelanceBudget = MONTHS.reduce((sum, m) => sum + (freelanceBudget[m.key] || 0), 0);
 
@@ -1916,27 +1920,10 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
           </div>
         </div>
 
-        {/* Cost Overage */}
-        <div style={styles.settingsSection}>
-          <h3 style={styles.insightTitle}>Monthly Cost Overage</h3>
-          <p style={styles.settingsSubtitle}>Added to revenue target each month (e.g., overhead costs not covered by billable work)</p>
-          <div style={styles.formGroup}>
-            <label style={styles.formLabel}>Amount per Month</label>
-            <input 
-              type="number" 
-              value={costOverage} 
-              onChange={e => setCostOverage(Number(e.target.value))} 
-              style={{...styles.input, width: '150px'}} 
-              min="0"
-              placeholder="0"
-            />
-          </div>
-        </div>
-
         {/* Monthly Targets */}
         <div style={styles.settingsSection}>
           <h3 style={styles.insightTitle}>Monthly Revenue Targets</h3>
-          <p style={styles.settingsSubtitle}>Annual Target: {formatCurrency(annualTarget)} (+ {formatCurrency(costOverage * 12)} overage = {formatCurrency(annualTarget + costOverage * 12)} effective)</p>
+          <p style={styles.settingsSubtitle}>Annual Target: {formatCurrency(annualTarget)} (+ {formatCurrency(annualOverage)} overage = {formatCurrency(annualTarget + annualOverage)} effective)</p>
           <div style={styles.monthGrid}>
             {MONTHS.map(month => (
               <div key={month.key} style={styles.monthInputGroup}>
@@ -1947,6 +1934,28 @@ function SettingsPanel({ settings, onSave, formatCurrency }) {
                   onChange={e => setMonthlyTargets({ ...monthlyTargets, [month.key]: Number(e.target.value) || 0 })}
                   style={styles.input}
                   placeholder="0"
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Monthly Cost Overage */}
+        <div style={styles.settingsSection}>
+          <h3 style={styles.insightTitle}>Monthly Cost Overage</h3>
+          <p style={styles.settingsSubtitle}>Costs (freelance, admin or otherwise) beyond budgeted costs that must be offset with incremental revenue</p>
+          <p style={styles.settingsSubtitle}>Annual Overage: {formatCurrency(annualOverage)}</p>
+          <div style={styles.monthGrid}>
+            {MONTHS.map(month => (
+              <div key={month.key} style={styles.monthInputGroup}>
+                <label style={styles.formLabel}>{month.label}</label>
+                <input
+                  type="number"
+                  value={monthlyOverage[month.key] || ''}
+                  onChange={e => setMonthlyOverage({ ...monthlyOverage, [month.key]: Number(e.target.value) || 0 })}
+                  style={styles.input}
+                  placeholder="0"
+                  min="0"
                 />
               </div>
             ))}
@@ -2255,10 +2264,10 @@ const styles = {
   chartLegend: { display: 'flex', gap: '24px', marginBottom: '16px' },
   legendItem: { display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px' },
   legendColor: { width: '16px', height: '16px' },
-  chartContainer: { display: 'flex', gap: '16px', marginBottom: '32px' },
+  chartContainer: { display: 'flex', gap: '16px', marginBottom: '32px', maxWidth: '500px' },
   chartYAxis: { display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: '11px', color: '#666', textAlign: 'right', paddingBottom: '24px', minWidth: '80px' },
-  chart: { flex: 1, display: 'flex', gap: '8px', alignItems: 'flex-end', height: '300px', borderBottom: '1px solid #000', borderLeft: '1px solid #000', paddingLeft: '8px', position: 'relative' },
-  chartBar: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%', position: 'relative' },
+  chart: { flex: 1, display: 'flex', gap: '8px', alignItems: 'flex-end', height: '200px', borderBottom: '1px solid #000', borderLeft: '1px solid #000', paddingLeft: '8px', position: 'relative' },
+  chartBar: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%', position: 'relative', maxWidth: '80px' },
   chartBarStack: { flex: 1, width: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' },
   chartBarSegment: { width: '100%', transition: 'height 0.3s' },
   chartBarLabel: { fontSize: '10px', marginTop: '8px', color: '#666' },
